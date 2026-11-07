@@ -174,6 +174,72 @@ test('poster cards deduplicate works after applying source permissions', async (
   ).toEqual([]);
 });
 
+test('folds existing split work IDs into one card and resolves each old detail link', async () => {
+  const primary = normalizeCmsItem(raw({ vod_douban_id: 123 }), a)!;
+  const fallback = normalizeCmsItem(raw(), b)!;
+  const unknown = normalizeCmsItem(raw({ vod_id: '2', type_name: '热播' }), b)!;
+  const items = [primary, fallback, unknown];
+  for (const item of items) await store.put(item, Date.now(), false);
+  expect(new Set(items.map((item) => item.workId)).size).toBe(3);
+
+  const restarted = new CatalogStore(new SQLiteAdapter(database));
+  const options = { query: '三体', defaultSourceKey: 'a', limit: 1 };
+  const wall = await restarted.browse([a, b], options);
+  expect(wall).toMatchObject({ total: 1, pageCount: 1 });
+  expect(wall.results).toMatchObject([{ source: 'a', resource_count: 2 }]);
+  expect(await restarted.browse([a, b], { ...options, page: 2 })).toMatchObject(
+    {
+      total: 1,
+      results: [],
+    }
+  );
+  for (const { workId } of items) {
+    const links = await restarted.search([a, b], {
+      workId,
+      defaultSourceKey: 'a',
+    });
+    expect(links.map((item) => `${item.source}:${item.id}`)).toEqual([
+      'a:1',
+      'b:1',
+      'b:2',
+    ]);
+  }
+  expect((await restarted.browse([b], options)).results).toMatchObject([
+    { source: 'b', resource_count: 1 },
+  ]);
+  expect(
+    (await restarted.search([b], { workId: fallback.workId })).map(
+      (item) => item.id
+    )
+  ).toEqual(['1', '2']);
+  expect((await restarted.detail(b, '2'))?.id).toBe('2');
+});
+
+test('keeps conflicting Douban IDs, release years, types and editions apart', async () => {
+  const first = normalizeCmsItem(raw({ vod_douban_id: 123 }), a)!;
+  const second = normalizeCmsItem(raw({ vod_id: '2', vod_douban_id: 456 }), b)!;
+  const fallback = normalizeCmsItem(raw(), b)!;
+  const separate = [
+    { vod_year: '2024' },
+    { vod_year: '' },
+    { type_name: '电影' },
+    { vod_name: '三体 第二季' },
+    { vod_name: '三体 第一季 粤语版' },
+  ].map(
+    (fields, index) =>
+      normalizeCmsItem(raw({ ...fields, vod_id: `extra-${index}` }), a)!
+  );
+  const items = [first, second, fallback, ...separate];
+  for (const item of items) await store.put(item, Date.now(), false);
+  expect((await store.browse([a, b])).total).toBe(items.length);
+  for (const item of items) {
+    const details = await store.search([a, b], { workId: item.workId });
+    expect(details).toMatchObject([
+      { id: item.result.id, source: item.result.source },
+    ]);
+  }
+});
+
 test('default source wins cards and detail ordering even over a newer resource with a cached poster', async () => {
   const primary = normalizeCmsItem(
     raw({

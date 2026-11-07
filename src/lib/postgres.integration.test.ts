@@ -171,25 +171,31 @@ describePostgres('PostgreSQL storage integration', () => {
       name: '测试源',
       api: 'https://source.invalid/api',
     };
-    const item = normalizeCmsItem(
-      {
-        vod_id: '1',
-        vod_name: '三体 第一季',
-        vod_year: '2023',
-        type_id: '2',
-        type_name: '国产剧',
-        vod_area: '中国大陆',
-        vod_play_from: 'hls',
-        vod_play_url: '第1集$https://video.invalid/1.m3u8',
-        vod_time: '2026-11-01 10:00:00',
-      },
-      source
-    )!;
+    const other = { ...source, key: 'other' };
+    const raw = {
+      vod_id: '1',
+      vod_name: '三体 第一季',
+      vod_year: '2023',
+      type_id: '2',
+      type_name: '国产剧',
+      vod_area: '中国大陆',
+      vod_play_from: 'hls',
+      vod_play_url: '第1集$https://video.invalid/1.m3u8',
+      vod_time: '2026-11-01 10:00:00',
+    };
+    const item = normalizeCmsItem({ ...raw, vod_douban_id: 123 }, source)!;
+    const fallback = normalizeCmsItem({ ...raw, type_name: '热播' }, other)!;
     await catalog.put(item, Date.now(), false);
+    await catalog.put(fallback, Date.now(), false);
     expect((await catalog.search([source], { query: '三体' }))[0].title).toBe(
       '三体 第一季'
     );
-    expect((await catalog.browse([source])).total).toBe(1);
+    const wall = await catalog.browse([source, other]);
+    expect(wall.total).toBe(1);
+    expect(wall.results[0].resource_count).toBe(2);
+    expect(
+      await catalog.search([source, other], { workId: fallback.workId })
+    ).toHaveLength(2);
   });
 
   test('global format filtering includes alternate M3U8 lines and keeps PostgreSQL pagination accurate', async () => {

@@ -103,6 +103,7 @@ const schema = [
   'CREATE INDEX IF NOT EXISTS catalog_resources_source ON catalog_resources(source_revision, source_updated_at)',
   'CREATE INDEX IF NOT EXISTS catalog_resources_browse ON catalog_resources(source_revision, source_key, type_id, restricted, indexed_at, work_id, source_updated_at, remote_id)',
   'CREATE INDEX IF NOT EXISTS catalog_works_filters ON catalog_works(kind, year, updated_at)',
+  'CREATE INDEX IF NOT EXISTS catalog_works_match ON catalog_works(normalized_title, year)',
   'CREATE INDEX IF NOT EXISTS catalog_resources_age ON catalog_resources(indexed_at)',
   'CREATE INDEX IF NOT EXISTS catalog_poster_refs ON catalog_resource_posters(poster_id)',
   'CREATE INDEX IF NOT EXISTS catalog_category_scope ON catalog_category_bindings(scope_key, category_id)',
@@ -659,19 +660,91 @@ export class CatalogStore {
     );
   }
 
+  // Reconcile legacy IDs at read time so already indexed resources and old URLs keep working.
+  private workGroups({ workId, query, year }: CatalogQuery) {
+    const titleQuery = normalizeTitle(query || '').slice(0, 40);
+    const values = [
+      ...(workId ? [workId] : []),
+      ...(titleQuery ? [`%${titleQuery}%`] : []),
+      ...(year ? [year] : []),
+    ];
+    const douban =
+      this.adapter.dialect === 'postgres'
+        ? "r.payload::jsonb->>'douban_id'"
+        : "CAST(json_extract(r.payload, '$.douban_id') AS TEXT)";
+    const sql = `WITH ${
+      workId
+        ? 'requested_work AS (SELECT id, normalized_title, year FROM catalog_works WHERE id=?),'
+        : ''
+    }
+      duplicate_titles AS (
+        SELECT w.normalized_title, w.year FROM catalog_works w
+        ${
+          workId
+            ? 'JOIN requested_work q ON q.normalized_title=w.normalized_title AND q.year=w.year'
+            : ''
+        }
+        WHERE w.year<>'' AND w.normalized_title<>''
+        ${titleQuery ? 'AND w.normalized_title LIKE ?' : ''} ${
+      year ? 'AND w.year=?' : ''
+    }
+        GROUP BY w.normalized_title, w.year HAVING COUNT(*) > 1
+      ), duplicate_works AS (
+        SELECT w.id, w.normalized_title, w.year, w.kind,
+          MIN(NULLIF(w.kind, 'other')) OVER by_title AS first_kind,
+          MAX(NULLIF(w.kind, 'other')) OVER by_title AS last_kind,
+          (SELECT CASE WHEN CAST(${douban} AS DECIMAL)>0 THEN ${douban} END
+            FROM catalog_resources r WHERE r.work_id=w.id LIMIT 1) AS douban_id
+        FROM duplicate_titles t JOIN catalog_works w
+          ON w.normalized_title=t.normalized_title AND w.year=t.year
+        WHERE EXISTS (SELECT 1 FROM catalog_resources r WHERE r.work_id=w.id)
+        WINDOW by_title AS (PARTITION BY w.normalized_title, w.year)
+      ), typed_works AS (
+        -- An unknown kind joins a known kind only when all known kinds agree.
+        SELECT *, CASE WHEN kind='other' AND first_kind=last_kind THEN first_kind ELSE kind END AS match_kind
+        FROM duplicate_works
+      ), identified_works AS (
+        SELECT *, MIN(douban_id) OVER by_kind AS first_id, MAX(douban_id) OVER by_kind AS last_id
+        FROM typed_works
+        WINDOW by_kind AS (PARTITION BY normalized_title, year, match_kind)
+      ), work_groups AS (
+        -- Keep unidentified resources in a separate group when positive IDs disagree.
+        SELECT id, MIN(id) OVER (PARTITION BY normalized_title, year, match_kind,
+          CASE WHEN first_id<>last_id THEN douban_id END) AS group_id
+        FROM identified_works
+      )`;
+    return { sql, values };
+  }
+
   async search(
     sites: ApiSite[],
     options: CatalogQuery = {}
   ): Promise<SearchResult[]> {
     if (!sites.length) return [];
     await this.init();
-    const where = await this.where(sites, options);
+    const { workId } = options;
+    const where = await this.where(sites, { ...options, workId: undefined });
     const limit = Math.max(1, Math.min(500, options.limit || 300));
+    const groups = workId ? this.workGroups({ workId }) : null;
+    const workFilter = groups
+      ? `AND w.id IN (
+        SELECT sibling.id FROM work_groups sibling WHERE sibling.group_id=(
+          SELECT g.group_id FROM work_groups g JOIN requested_work q ON q.id=g.id
+        ) UNION ALL SELECT id FROM requested_work)`
+      : '';
     const rows = await this.rows(
-      `SELECT r.payload FROM catalog_resources r JOIN catalog_works w ON w.id=r.work_id
-      WHERE ${where.sql} ORDER BY CASE WHEN r.source_key=? THEN 0 ELSE 1 END,
+      `${groups?.sql || ''}
+      SELECT r.payload FROM catalog_resources r JOIN catalog_works w ON w.id=r.work_id
+      WHERE ${
+        where.sql
+      } ${workFilter} ORDER BY CASE WHEN r.source_key=? THEN 0 ELSE 1 END,
         r.source_updated_at DESC, r.source_key, r.remote_id LIMIT ?`,
-      [...where.values, options.defaultSourceKey || '', limit]
+      [
+        ...(groups?.values || []),
+        ...where.values,
+        options.defaultSourceKey || '',
+        limit,
+      ]
     );
     return rows.flatMap((row) => {
       const result = this.hydrate(row, sites, options.m3u8Only);
@@ -780,54 +853,52 @@ export class CatalogStore {
     const where = await this.where(sites, options);
     const page = Math.max(1, Math.floor(options.page || 1));
     const limit = Math.max(1, Math.min(60, options.limit || 30));
-    const counts = await this.rows(
-      `SELECT COUNT(DISTINCT w.id) AS total FROM catalog_works w
-      JOIN catalog_resources r ON r.work_id=w.id WHERE ${where.sql}`,
-      where.values
-    );
-    const total = Number(counts[0]?.total || 0);
     const order =
       options.order === 'updated'
-        ? 'updated_at DESC, title'
-        : 'year DESC, updated_at DESC';
-    // Page the small work metadata first. Loading/ranking every resource payload
-    // before LIMIT makes even a one-card request process the entire catalog.
+        ? 'cards.updated_at DESC, cards.title, cards.work_id'
+        : 'cards.year DESC, cards.updated_at DESC, cards.work_id';
+    const groups = this.workGroups({
+      query: options.query,
+      year: options.year,
+    });
+    // Group and page permitted metadata before ranking sources or loading card payloads.
     const works = await this.rows(
-      `SELECT w.id AS work_id, w.kind, w.year, w.area, w.title,
-        MAX(r.source_updated_at) AS updated_at, COUNT(*) AS resource_count
-      FROM catalog_works w JOIN catalog_resources r ON r.work_id=w.id
-      WHERE ${where.sql} GROUP BY w.id
-      ORDER BY ${order}, work_id LIMIT ? OFFSET ?`,
-      [...where.values, limit, (page - 1) * limit]
+      `${groups.sql}, visible AS MATERIALIZED (
+        SELECT COALESCE(g.group_id, w.id) AS group_id, w.id AS work_id,
+          w.year, w.title, r.source_key, r.remote_id, r.source_updated_at
+        FROM catalog_works w JOIN catalog_resources r ON r.work_id=w.id
+        LEFT JOIN work_groups g ON g.id=w.id WHERE ${where.sql}
+      ), grouped_cards AS (
+        SELECT group_id, MIN(work_id) AS work_id, MIN(title) AS title, MAX(year) AS year,
+          MAX(source_updated_at) AS updated_at, COUNT(DISTINCT source_key) AS resource_count
+        FROM visible GROUP BY group_id
+      ), page_cards AS (
+        SELECT * FROM grouped_cards cards ORDER BY ${order} LIMIT ? OFFSET ?
+      ), ranked AS (
+        SELECT v.group_id, v.work_id, v.source_key, v.remote_id,
+          ROW_NUMBER() OVER (PARTITION BY v.group_id ORDER BY
+            CASE WHEN v.source_key=? THEN 0 ELSE 1 END,
+            CASE WHEN EXISTS (SELECT 1 FROM catalog_resource_posters rp JOIN catalog_posters p ON p.id=rp.poster_id
+              WHERE rp.source_key=v.source_key AND rp.remote_id=v.remote_id) THEN 0 ELSE 1 END,
+            v.source_updated_at DESC, v.source_key, v.remote_id) AS position
+        FROM page_cards cards JOIN visible v ON v.group_id=cards.group_id
+      )
+      SELECT totals.total, cards.work_id, cards.resource_count, cards.updated_at, w.kind, w.area, r.payload
+      FROM (SELECT COUNT(*) AS total FROM grouped_cards) totals
+      LEFT JOIN page_cards cards ON 1=1
+      LEFT JOIN ranked x ON x.group_id=cards.group_id AND x.position=1
+      LEFT JOIN catalog_works w ON w.id=x.work_id
+      LEFT JOIN catalog_resources r ON r.source_key=x.source_key AND r.remote_id=x.remote_id
+      ORDER BY ${order}`,
+      [
+        ...groups.values,
+        ...where.values,
+        limit,
+        (page - 1) * limit,
+        options.defaultSourceKey || '',
+      ]
     );
-    const resources = new Map<string, Row>();
-    // Reserve parameters for source permissions and long search terms within D1's limit.
-    const batchSize = Math.max(1, Math.min(30, 99 - where.values.length));
-    for (let offset = 0; offset < works.length; offset += batchSize) {
-      const chunk = works.slice(offset, offset + batchSize);
-      const rows = await this.rows(
-        `SELECT ranked.work_id, selected.payload FROM (
-          SELECT r.work_id, r.source_key, r.remote_id,
-            ROW_NUMBER() OVER (PARTITION BY r.work_id ORDER BY
-              CASE WHEN r.source_key=? THEN 0 ELSE 1 END,
-              CASE WHEN EXISTS (SELECT 1 FROM catalog_resource_posters rp JOIN catalog_posters p ON p.id=rp.poster_id
-                WHERE rp.source_key=r.source_key AND rp.remote_id=r.remote_id) THEN 0 ELSE 1 END,
-              r.source_updated_at DESC, r.source_key, r.remote_id) AS position
-          FROM catalog_resources r JOIN catalog_works w ON w.id=r.work_id
-          WHERE r.work_id IN (${chunk.map(() => '?').join(',')}) AND ${
-          where.sql
-        }
-        ) ranked JOIN catalog_resources selected
-          ON selected.source_key=ranked.source_key AND selected.remote_id=ranked.remote_id
-        WHERE ranked.position=1`,
-        [
-          options.defaultSourceKey || '',
-          ...chunk.map((work) => String(work.work_id)),
-          ...where.values,
-        ]
-      );
-      for (const row of rows) resources.set(String(row.work_id), row);
-    }
+    const total = Number(works[0]?.total || 0);
     const facetWhere = await this.where(sites, {
       m3u8Only: options.m3u8Only,
       cleanupEnabled: options.cleanupEnabled,
@@ -844,9 +915,8 @@ export class CatalogStore {
     return {
       categories: this.navigationCategories(facets, options),
       results: works.flatMap((row) => {
-        const resource = resources.get(String(row.work_id));
-        const hydrated = resource
-          ? this.hydrate(resource, sites, options.m3u8Only)
+        const hydrated = row.payload
+          ? this.hydrate(row, sites, options.m3u8Only)
           : null;
         return hydrated
           ? [
