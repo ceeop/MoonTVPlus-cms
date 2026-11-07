@@ -63,29 +63,29 @@ function prefix(pts: number, level: number) {
   ]);
   return packet;
 }
+function segmentResponse(pts: number, ad: boolean) {
+  let read = false;
+  return {
+    ok: true,
+    status: 206,
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (read) return { done: true };
+          read = true;
+          return { done: false, value: prefix(pts, ad ? 50 : 40) };
+        },
+        cancel,
+      }),
+    },
+  };
+}
 beforeEach(() => {
   jest.clearAllMocks();
   (validateProxyUrlServerSide as jest.Mock).mockResolvedValue(true);
   global.fetch = jest.fn().mockImplementation(async (url: string) => {
     const name = new URL(url).pathname.split('/').pop()?.split('.')[0] || '';
-    let read = false;
-    return {
-      ok: true,
-      status: 206,
-      body: {
-        getReader: () => ({
-          read: async () => {
-            if (read) return { done: true };
-            read = true;
-            return {
-              done: false,
-              value: prefix(times[name], name.startsWith('insert') ? 50 : 40),
-            };
-          },
-          cancel,
-        }),
-      },
-    };
+    return segmentResponse(times[name], name.startsWith('insert'));
   });
 });
 afterAll(() => {
@@ -118,6 +118,40 @@ test.each([
     );
   }
 );
+
+test('removes two verified ad breaks across an 86-group VOD playlist', async () => {
+  const adGroups = new Set([11, 12, 65, 66]);
+  let mainPts = 1.4;
+  const longGroups = Array.from({ length: 86 }, (_, index) => {
+    const ad = adGroups.has(index);
+    const pts = ad ? (adGroups.has(index - 1) ? 6.4 : 1.4) : mainPts;
+    if (!ad) mainPts += 20;
+    return { pts, ad, url: `group-${index}.ts` };
+  });
+  const longPlaylist = [
+    '#EXTM3U',
+    ...longGroups.flatMap(({ ad, url }) => [
+      '#EXT-X-DISCONTINUITY',
+      `#EXTINF:${ad ? 5 : 20},`,
+      url,
+    ]),
+    '#EXT-X-ENDLIST',
+  ].join('\n');
+  (fetch as jest.Mock).mockImplementation(async (url: string) => {
+    const index = Number(new URL(url).pathname.match(/group-(\d+)\.ts$/)?.[1]);
+    const { pts, ad } = longGroups[index];
+    return segmentResponse(pts, ad);
+  });
+
+  const result = await filterUnmarkedHlsAds(
+    longPlaylist,
+    'https://long.example/playlist.m3u8'
+  );
+  expect(result.split('\n').filter((line) => line.endsWith('.ts'))).toEqual(
+    longGroups.filter(({ ad }) => !ad).map(({ url }) => url)
+  );
+  expect(fetch).toHaveBeenCalledTimes(86);
+});
 
 test('failed probes preserve the text-filtered playlist and do not poison later retries', async () => {
   (fetch as jest.Mock).mockRejectedValue(new Error('unreachable'));

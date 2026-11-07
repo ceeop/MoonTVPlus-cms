@@ -11,6 +11,7 @@ import {
 import { validateProxyUrlServerSide } from './ssrf';
 
 const PREFIX_BYTES = 16384;
+const PROBE_CONCURRENCY = 16;
 const CACHE_TTL = 5 * 60 * 1000;
 const cache = new Map<string, { expires: number; result: Promise<string> }>();
 
@@ -92,11 +93,11 @@ export async function filterUnmarkedHlsAds(
     try {
       const analysis = (async () => {
         const identities: Array<HlsSegmentIdentity | null> = [];
-        for (let i = 0; i < groups.length; i += 4) {
+        for (let i = 0; i < groups.length; i += PROBE_CONCURRENCY) {
           if (controller.signal.aborted) return content;
           identities.push(
             ...(await Promise.all(
-              groups.slice(i, i + 4).map(async (group) => {
+              groups.slice(i, i + PROBE_CONCURRENCY).map(async (group) => {
                 try {
                   return await probe(
                     new URL(group.url, baseUrl).href,

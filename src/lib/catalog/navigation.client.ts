@@ -7,6 +7,12 @@ interface Category {
 
 let pending: Promise<Array<Category & { href: string }>> | undefined;
 
+export function getActiveCatalogHref(searchParams: Pick<URLSearchParams, 'get'>) {
+  const filter = searchParams.get('category') ? 'category' : 'kind';
+  const id = searchParams.get(filter);
+  return id ? `/catalog?${filter}=${encodeURIComponent(id)}` : '/catalog';
+}
+
 export async function loadCatalogNavigation(signal: AbortSignal) {
   if (signal.aborted)
     throw new DOMException('已取消分类导航加载', 'AbortError');

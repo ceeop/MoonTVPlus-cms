@@ -964,28 +964,20 @@ function PlayPageClient() {
     needPreferRef.current = needPrefer;
   }, [needPrefer]);
   // 集数相关
-  const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(() => {
-    const episodeParam = searchParams.get('episode');
-    if (episodeParam) {
-      const episode = parseInt(episodeParam, 10);
-      return episode > 0 ? episode - 1 : 0; // URL 中是 1-based，内部是 0-based
-    }
-    return 0;
-  });
+  const urlEpisode = parseInt(searchParams.get('episode') || '', 10);
+  const urlEpisodeIndex = urlEpisode > 0 ? urlEpisode - 1 : null;
+  const urlEpisodeIndexRef = useRef(urlEpisodeIndex);
+  const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(
+    urlEpisodeIndex ?? 0
+  );
 
-  // 监听 URL 参数变化，更新集数索引（用于房员跟随换集）
+  // 房员跟随 URL 集数变化。播放器内部换集时，原 URL 的集数无需再次应用。
   useEffect(() => {
-    const episodeParam = searchParams.get('episode');
-    if (episodeParam) {
-      const episode = parseInt(episodeParam, 10);
-      const newIndex = episode > 0 ? episode - 1 : 0;
-      console.log('[PlayPage] Checking episode from URL:', { urlEpisode: episode, currentIndex: currentEpisodeIndex, newIndex });
-      if (newIndex !== currentEpisodeIndex) {
-        console.log('[PlayPage] URL episode changed, updating index to:', newIndex);
-        setCurrentEpisodeIndex(newIndex);
-      }
+    urlEpisodeIndexRef.current = urlEpisodeIndex;
+    if (urlEpisodeIndex !== null) {
+      setCurrentEpisodeIndex(urlEpisodeIndex);
     }
-  }, [searchParams, currentEpisodeIndex]);
+  }, [urlEpisodeIndex]);
 
   // 监听集数变化，移除已显示的跳转按钮
   useEffect(() => {
@@ -5721,63 +5713,19 @@ function PlayPageClient() {
         const key = generateStorageKey(detailData.source, detailData.id);
         const record = allRecords[key];
 
-        // 确定初始集数索引
-        let initialIndex = 0;
-        let shouldResumeTime = false;
-
-        if (record) {
-          // 有播放记录
-          const recordIndex = record.index - 1;
-          const recordTime = record.play_time;
-
-          // 如果有initialEpisodeIndex（用户从文件点击进入）
-          if (detailData.initialEpisodeIndex !== undefined) {
-            // 如果播放记录的集数和点击的文件集数一致，则使用播放记录的时间
-            if (recordIndex === detailData.initialEpisodeIndex) {
-              initialIndex = recordIndex;
-              shouldResumeTime = true;
-              resumeTimeRef.current = recordTime;
-              console.log('[Play] 播放记录集数与点击文件一致，恢复播放进度:', recordTime);
-            } else {
-              // 否则使用点击的文件集数，从头开始播放
-              initialIndex = detailData.initialEpisodeIndex;
-              const localEpisodeTime = loadLocalEpisodeProgress(
-                detailEpisodeProgressContentKey,
-                initialIndex
-              );
-              resumeTimeRef.current = localEpisodeTime;
-              console.log('[Play] 使用点击的文件集数:', initialIndex);
-            }
-          } else {
-            // 没有initialEpisodeIndex，使用播放记录
-            initialIndex = recordIndex;
-            shouldResumeTime = true;
-            resumeTimeRef.current = recordTime;
-            console.log('[Play] 使用播放记录集数:', initialIndex);
-          }
-        } else {
-          // 没有播放记录
-          if (detailData.initialEpisodeIndex !== undefined) {
-            // 使用点击的文件集数
-            initialIndex = detailData.initialEpisodeIndex;
-            resumeTimeRef.current = loadLocalEpisodeProgress(
-              detailEpisodeProgressContentKey,
-              initialIndex
-            );
-            console.log('[Play] 没有播放记录，使用点击的文件集数:', initialIndex);
-          } else {
-            // 默认从第0集开始
-            initialIndex = 0;
-            resumeTimeRef.current = loadLocalEpisodeProgress(
-              detailEpisodeProgressContentKey,
-              initialIndex
-            );
-            console.log('[Play] 没有播放记录，从第0集开始');
-          }
-        }
-
-        // 更新当前选集索引
+        const requestedIndex = urlEpisodeIndexRef.current;
+        const initialIndex =
+          requestedIndex !== null && requestedIndex < detailData.episodes.length
+            ? requestedIndex
+            : detailData.initialEpisodeIndex ?? (record ? record.index - 1 : 0);
         if (initialIndex < detailData.episodes.length && initialIndex >= 0) {
+          resumeTimeRef.current =
+            record?.index === initialIndex + 1
+              ? record.play_time
+              : loadLocalEpisodeProgress(
+                  detailEpisodeProgressContentKey,
+                  initialIndex
+                );
           setCurrentEpisodeIndex(initialIndex);
           currentEpisodeIndexRef.current = initialIndex;
         }
@@ -5835,8 +5783,7 @@ function PlayPageClient() {
         const currentPlayTime = artPlayerRef.current?.currentTime || 0;
 
         // 获取URL中的episode参数
-        const episodeParam = searchParams.get('episode');
-        const targetEpisode = episodeParam ? parseInt(episodeParam, 10) - 1 : 0;
+        const targetEpisode = urlEpisodeIndex ?? 0;
 
         // 更新视频源信息（urlSource 已经是完整格式）
         setCurrentSource(urlSource);

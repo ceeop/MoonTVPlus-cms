@@ -10,6 +10,8 @@ export interface HlsSegmentIdentity {
   codec: string;
 }
 
+const MAX_MEDIA_GROUPS = 128;
+
 /** Analyze complete, self-contained TS playlists; other HLS formats retain text rules. */
 export function hlsMediaGroups(content: string): HlsMediaGroup[] {
   if (
@@ -47,7 +49,7 @@ export function hlsMediaGroups(content: string): HlsMediaGroup[] {
     }
   }
   if (group) groups.push(group);
-  return groups.length >= 3 && groups.length <= 64 ? groups : [];
+  return groups.length >= 3 && groups.length <= MAX_MEDIA_GROUPS ? groups : [];
 }
 
 function ptsValue(bytes: Uint8Array, offset: number) {

@@ -28,7 +28,10 @@ import {
   useState,
 } from 'react';
 
-import { loadCatalogNavigation } from '@/lib/catalog/navigation.client';
+import {
+  getActiveCatalogHref,
+  loadCatalogNavigation,
+} from '@/lib/catalog/navigation.client';
 import { SPECIAL_SOURCE_PATH } from '@/lib/special-source.client';
 
 import { useSite } from './SiteProvider';
@@ -79,6 +82,8 @@ declare global {
 const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const activeCatalogHref =
+    pathname === '/catalog' ? getActiveCatalogHref(searchParams) : undefined;
   const watchRoomContext = useWatchRoomContextSafe();
 
   // 若同一次 SPA 会话中已经读取过折叠状态，则直接复用，避免闪烁
@@ -398,16 +403,19 @@ const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
                   const itemPathname = decodedItemHref.split('?')[0];
 
                   const isActive =
-                    decodedActive === decodedItemHref ||
-                    (decodedActive.startsWith('/douban') &&
-                      decodedActive.includes(`type=${typeMatch}`)) ||
-                    // 对于没有type参数的路径，只比较路径名
-                    (!typeMatch && activePathname === itemPathname);
+                    itemPathname === '/catalog'
+                      ? item.href === activeCatalogHref
+                      : decodedActive === decodedItemHref ||
+                        (decodedActive.startsWith('/douban') &&
+                          decodedActive.includes(`type=${typeMatch}`)) ||
+                        // 对于没有type参数的其他路径，只比较路径名
+                        (!typeMatch && activePathname === itemPathname);
                   const Icon = item.icon;
                   return (
                     <Link
                       key={item.label}
                       href={item.href}
+                      aria-current={isActive ? 'page' : undefined}
                       data-active={isActive}
                       className={`group flex items-center rounded-lg px-2 py-2 pl-4 text-sm text-gray-700 hover:bg-gray-100/30 hover:text-green-600 data-[active=true]:bg-green-500/20 data-[active=true]:text-green-700 transition-colors duration-200 min-h-[40px] dark:text-gray-300 dark:hover:text-green-400 dark:data-[active=true]:bg-green-500/10 dark:data-[active=true]:text-green-400 ${
                         isCollapsed ? 'w-full max-w-none mx-0' : 'mx-0'

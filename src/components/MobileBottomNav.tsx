@@ -19,7 +19,10 @@ import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
-import { loadCatalogNavigation } from '@/lib/catalog/navigation.client';
+import {
+  getActiveCatalogHref,
+  loadCatalogNavigation,
+} from '@/lib/catalog/navigation.client';
 
 import { useWatchRoomContextSafe } from './WatchRoomProvider';
 
@@ -40,7 +43,10 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
     const queryString = searchParams.toString();
     return queryString ? `${pathname}?${queryString}` : pathname;
   };
-  const currentActive = activePath ?? getCurrentFullPath();
+  const currentActive =
+    pathname === '/catalog'
+      ? getActiveCatalogHref(searchParams)
+      : activePath ?? getCurrentFullPath();
 
   const [navItems, setNavItems] = useState([
     { icon: Home, label: '首页', href: '/' },
@@ -240,6 +246,7 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
               <Link
                 href={item.href}
                 prefetch={false}
+                aria-current={active ? 'page' : undefined}
                 className='flex flex-col items-center justify-center w-full h-14 gap-1 text-xs'
               >
                 <item.icon
