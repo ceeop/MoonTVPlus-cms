@@ -4,6 +4,9 @@
 /node_modules
 /.pnp
 .pnp.js
+/.corepack/
+/.pnpm-home/
+/.pnpm-store/
 
 # testing
 /coverage
@@ -11,6 +14,9 @@
 # next.js
 .next
 /.next/
+/.next-production/
+/.next-production-previous-*/
+/.swc/
 /out/
 
 # production
