@@ -1,0 +1,33 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: custom
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        run: |
+          git fetch --no-tags https://github.com/mtvpls/MoonTVPlus.git refs/heads/main
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo 'Upstream main is already merged.'
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit FETCH_HEAD
+          git push origin HEAD:refs/heads/custom
