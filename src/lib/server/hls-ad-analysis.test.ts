@@ -161,6 +161,41 @@ test('failed probes preserve the text-filtered playlist and do not poison later 
   expect(fetch).toHaveBeenCalledTimes(12);
 });
 
+test('recovers an ad break using second segments when boundary probes fail', async () => {
+  const playlist = content
+    .replace(
+      '#EXTINF:5,\ninsert0.png',
+      '#EXTINF:2.5,\ninsert0.png\n#EXTINF:2.5,\ninsert0-backup.png'
+    )
+    .replace(
+      '#EXTINF:20,\nmain3.png',
+      '#EXTINF:3.2,\nmain3.png\n#EXTINF:16.8,\nmain3-backup.png'
+    );
+  const fetchMock = fetch as jest.Mock;
+  const successfulProbe = fetchMock.getMockImplementation();
+  fetchMock.mockImplementation(async (url: string) => {
+    const name = new URL(url).pathname.split('/').pop();
+    if (name === 'insert0.png' || name === 'main3.png') {
+      throw new Error('unreachable');
+    }
+    if (name === 'insert0-backup.png')
+      return segmentResponse(times.insert0 + 2.5, true);
+    if (name === 'main3-backup.png')
+      return segmentResponse(times.main3 + 3.2, false);
+    return successfulProbe?.(url);
+  });
+
+  const filtered = await filterUnmarkedHlsAds(
+    playlist,
+    'https://backup.example/a.m3u8'
+  );
+  expect(filtered).not.toContain('insert0');
+  expect(filtered).not.toContain('insert1');
+  expect(filtered).toContain('main3.png');
+  expect(filtered).toContain('main3-backup.png');
+  expect(fetchMock).toHaveBeenCalledTimes(8);
+});
+
 test('redirect targets receive network validation before any fetch', async () => {
   (validateProxyUrlServerSide as jest.Mock).mockImplementation(
     async (url: string) => !url.includes('127.0.0.1')

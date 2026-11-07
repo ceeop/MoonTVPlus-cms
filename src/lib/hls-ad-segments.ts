@@ -2,6 +2,7 @@ export interface HlsMediaGroup {
   segments: string[];
   duration: number;
   firstSegment: number;
+  firstSegmentDuration: number;
 }
 
 export interface HlsSegmentIdentity {
@@ -39,6 +40,7 @@ export function hlsMediaGroups(content: string): HlsMediaGroup[] {
           segments: [],
           duration: 0,
           firstSegment: segment,
+          firstSegmentDuration: duration,
         };
       group.duration += duration;
       group.segments.push(line);

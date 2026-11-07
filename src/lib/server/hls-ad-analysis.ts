@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 
 import { filterAdsFromM3U8 } from '@/lib/hls-ad-filter';
-import type { HlsSegmentIdentity } from '@/lib/hls-ad-segments';
+import type { HlsMediaGroup, HlsSegmentIdentity } from '@/lib/hls-ad-segments';
 import {
   hlsMediaGroups,
   hlsSegmentIdentity,
@@ -12,6 +12,7 @@ import { validateProxyUrlServerSide } from './ssrf';
 
 const PREFIX_BYTES = 16384;
 const PROBE_CONCURRENCY = 16;
+const PROBE_TIMEOUT_MS = 3000;
 const CACHE_TTL = 5 * 60 * 1000;
 const cache = new Map<string, { expires: number; result: Promise<string> }>();
 
@@ -68,6 +69,36 @@ async function probe(
   return null;
 }
 
+async function probeGroup(
+  group: HlsMediaGroup,
+  baseUrl: string,
+  signal: AbortSignal
+): Promise<HlsSegmentIdentity | null> {
+  for (let i = 0; i < Math.min(2, group.segments.length); i++) {
+    if (signal.aborted) return null;
+    const attempt = new AbortController();
+    const abortAttempt = () => attempt.abort();
+    signal.addEventListener('abort', abortAttempt, { once: true });
+    const timeout = setTimeout(abortAttempt, PROBE_TIMEOUT_MS);
+    try {
+      const identity = await probe(
+        new URL(group.segments[i], baseUrl).href,
+        attempt.signal
+      );
+      // The second segment starts one segment duration into the same timeline.
+      const offset = i === 0 ? 0 : group.firstSegmentDuration;
+      if (identity && identity.pts >= offset)
+        return { ...identity, pts: identity.pts - offset };
+    } catch {
+      // Try the next segment when a CDN request or prefix read fails.
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', abortAttempt);
+    }
+  }
+  return null;
+}
+
 /** Shared by web/native players and TVBox via the playlist proxy, for every source. */
 export async function filterUnmarkedHlsAds(
   content: string,
@@ -96,14 +127,11 @@ export async function filterUnmarkedHlsAds(
       const probeGroups = async () => {
         while (nextGroup < groups.length && !controller.signal.aborted) {
           const index = nextGroup++;
-          try {
-            identities[index] = await probe(
-              new URL(groups[index].segments[0], baseUrl).href,
-              controller.signal
-            );
-          } catch {
-            // A missing group only limits verification of the neighboring timeline.
-          }
+          identities[index] = await probeGroup(
+            groups[index],
+            baseUrl,
+            controller.signal
+          );
         }
       };
       const analysis = Promise.all(
