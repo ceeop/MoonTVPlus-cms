@@ -82,46 +82,42 @@ export async function filterUnmarkedHlsAds(
   const existing = cache.get(key);
   if (existing && existing.expires > Date.now()) return existing.result;
   const controller = new AbortController();
+  const identities: Array<HlsSegmentIdentity | null> = groups.map(() => null);
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  const budget = new Promise<string>((resolve) => {
+  const budget = new Promise<void>((resolve) => {
     timeout = setTimeout(() => {
       controller.abort();
-      resolve(content);
+      resolve();
     }, 10000);
   });
   const result = (async () => {
     try {
-      const analysis = (async () => {
-        const identities: Array<HlsSegmentIdentity | null> = [];
-        for (let i = 0; i < groups.length; i += PROBE_CONCURRENCY) {
-          if (controller.signal.aborted) return content;
-          identities.push(
-            ...(await Promise.all(
-              groups.slice(i, i + PROBE_CONCURRENCY).map(async (group) => {
-                try {
-                  return await probe(
-                    new URL(group.url, baseUrl).href,
-                    controller.signal
-                  );
-                } catch {
-                  return null;
-                }
-              })
-            ))
-          );
+      let nextGroup = 0;
+      const probeGroups = async () => {
+        while (nextGroup < groups.length && !controller.signal.aborted) {
+          const index = nextGroup++;
+          try {
+            identities[index] = await probe(
+              new URL(groups[index].segments[0], baseUrl).href,
+              controller.signal
+            );
+          } catch {
+            // A missing group only limits verification of the neighboring timeline.
+          }
         }
-        if (identities.some((identity) => !identity)) {
-          cache.delete(key);
-          return content;
-        }
-        const removed = unmarkedAdSegments(groups, identities);
-        return removed.size
-          ? filterAdsFromM3U8('', content, undefined, removed)
-          : content;
-      })();
-      const filtered = await Promise.race([analysis, budget]);
-      if (controller.signal.aborted) cache.delete(key);
-      return filtered;
+      };
+      const analysis = Promise.all(
+        Array.from(
+          { length: Math.min(groups.length, PROBE_CONCURRENCY) },
+          probeGroups
+        )
+      );
+      await Promise.race([analysis, budget]);
+      if (identities.some((identity) => !identity)) cache.delete(key);
+      const removed = unmarkedAdSegments(groups, identities);
+      return removed.size
+        ? filterAdsFromM3U8('', content, undefined, removed)
+        : content;
     } catch {
       cache.delete(key);
       return content;

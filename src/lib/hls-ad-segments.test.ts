@@ -111,6 +111,63 @@ test('supports a three-block insert after an established long main segment group
   ).toEqual([3, 4]);
 });
 
+const repeatedInsert = ['insert-a.ts', 'insert-b.ts'];
+const repeatedInsertPlaylist = (copies: string[][]) =>
+  [
+    '#EXTM3U',
+    ...copies.flatMap((copy, index) => [
+      '#EXT-X-DISCONTINUITY',
+      ...[0, 1, 2].map((segment) => `#EXTINF:30,\nmain-${index}-${segment}.ts`),
+      '#EXT-X-DISCONTINUITY',
+      ...copy.map((url) => `#EXTINF:8.82,\n${url}`),
+    ]),
+    '#EXT-X-ENDLIST',
+  ].join('\n');
+const sameCodec = (pts: number[]) =>
+  pts.map((pts) => ({ pts, codec: 'avc:same' }));
+
+test('removes exact repeated inserts with matching codecs, including the final copy', () => {
+  const groups = hlsMediaGroups(
+    repeatedInsertPlaylist([repeatedInsert, repeatedInsert, repeatedInsert])
+  );
+  expect(
+    Array.from(
+      unmarkedAdSegments(
+        groups,
+        sameCodec([1.48, 1.48, 91.48, 1.48, 181.48, 1.48])
+      )
+    )
+  ).toEqual([3, 4, 8, 9, 13, 14]);
+});
+
+test('keeps repeated clips without evidence that the main timeline resumes', () => {
+  const groups = hlsMediaGroups(
+    repeatedInsertPlaylist([repeatedInsert, repeatedInsert, repeatedInsert])
+  );
+  expect(
+    unmarkedAdSegments(
+      groups,
+      sameCodec([1.48, 1.48, 121.48, 1.48, 251.48, 1.48])
+    )
+  ).toHaveProperty('size', 0);
+});
+
+test('keeps groups that only share the first segment of an otherwise different clip', () => {
+  const groups = hlsMediaGroups(
+    repeatedInsertPlaylist([
+      repeatedInsert,
+      ['insert-a.ts', 'different-b.ts'],
+      ['insert-a.ts', 'different-c.ts'],
+    ])
+  );
+  expect(
+    unmarkedAdSegments(
+      groups,
+      sameCodec([1.48, 1.48, 91.48, 1.48, 181.48, 1.48])
+    )
+  ).toHaveProperty('size', 0);
+});
+
 test.each([
   (text: string) => text.replace('#EXT-X-ENDLIST', ''),
   (text: string) =>

@@ -1,8 +1,7 @@
 export interface HlsMediaGroup {
-  url: string;
+  segments: string[];
   duration: number;
   firstSegment: number;
-  segmentCount: number;
 }
 
 export interface HlsSegmentIdentity {
@@ -37,13 +36,12 @@ export function hlsMediaGroups(content: string): HlsMediaGroup[] {
     } else if (line && !line.startsWith('#') && duration !== undefined) {
       if (!group)
         group = {
-          url: line,
+          segments: [],
           duration: 0,
           firstSegment: segment,
-          segmentCount: 0,
         };
       group.duration += duration;
-      group.segmentCount++;
+      group.segments.push(line);
       segment++;
       duration = undefined;
     }
@@ -146,74 +144,98 @@ export function hlsSegmentIdentity(
   return null;
 }
 
-/** A short reset with different encoding must rejoin an established main timeline. */
+/** Verify a short insert against the main timeline before cutting it. */
 export function unmarkedAdSegments(
   groups: HlsMediaGroup[],
   identities: Array<HlsSegmentIdentity | null>
 ): Set<number> {
   const removed = new Set<number>();
-  if (
-    groups.length !== identities.length ||
-    identities.some((identity) => !identity)
-  )
-    return removed;
-  const streams = identities as HlsSegmentIdentity[];
+  if (groups.length !== identities.length) return removed;
+  const signatures = groups.map(({ duration, segments }) =>
+    duration <= 60 && segments.length > 1
+      ? `${duration}\n${segments.join('\n')}`
+      : ''
+  );
+  const occurrences = new Map<string, number>();
+  for (const signature of signatures) {
+    if (signature)
+      occurrences.set(signature, (occurrences.get(signature) ?? 0) + 1);
+  }
+  const confirmedRepeats = new Set<string>();
+  const removeGroup = ({ firstSegment, segments }: HlsMediaGroup) => {
+    for (let i = 0; i < segments.length; i++) removed.add(firstSegment + i);
+  };
   let previous = 0;
   let stableGroups = 1;
   let stableDuration = groups[0]?.duration || 0;
-  let stableSegments = groups[0]?.segmentCount || 0;
+  let stableSegments = groups[0]?.segments.length || 0;
+  const startTimelineAt = (index: number) => {
+    previous = index;
+    stableGroups = 1;
+    stableDuration = groups[index].duration;
+    stableSegments = groups[index].segments.length;
+  };
   for (let i = 1; i < groups.length; i++) {
-    const main = streams[previous];
+    const main = identities[previous];
+    const stream = identities[i];
+    if (!main || !stream) {
+      startTimelineAt(i);
+      continue;
+    }
     const expected = main.pts + groups[previous].duration;
-    if (
-      Math.abs(streams[i].pts - expected) < 0.5 &&
-      streams[i].codec === main.codec
-    ) {
+    const resumesMain = (stream?: HlsSegmentIdentity | null) =>
+      stream?.codec === main.codec && Math.abs(stream.pts - expected) < 0.5;
+    if (resumesMain(stream)) {
       previous = i;
       stableGroups++;
       stableDuration += groups[i].duration;
-      stableSegments += groups[i].segmentCount;
+      stableSegments += groups[i].segments.length;
       continue;
     }
     let resume = -1;
-    let duration = 0;
     if (
       ((stableGroups >= 3 && stableDuration >= 30) ||
         (stableDuration >= 60 && stableSegments >= 3)) &&
-      streams[i].pts < expected - 5 &&
-      streams[i].codec !== main.codec
+      stream.pts < expected - 5
     ) {
-      for (let j = i; j < Math.min(groups.length - 1, i + 4); j++) {
-        duration += groups[j].duration;
-        if (
-          duration > 60 ||
-          streams[j].pts >= expected - 5 ||
-          streams[j].codec === main.codec
-        )
-          break;
-        if (
-          Math.abs(streams[j + 1].pts - expected) < 0.5 &&
-          streams[j + 1].codec === main.codec
-        ) {
-          resume = j + 1;
-          break;
+      if (
+        (occurrences.get(signatures[i]) ?? 0) > 1 &&
+        resumesMain(identities[i + 1])
+      ) {
+        resume = i + 1;
+        confirmedRepeats.add(signatures[i]);
+      } else {
+        let duration = 0;
+        for (let j = i; j < Math.min(groups.length - 1, i + 4); j++) {
+          const candidate = identities[j];
+          duration += groups[j].duration;
+          if (
+            !candidate ||
+            duration > 60 ||
+            candidate.pts >= expected - 5 ||
+            candidate.codec === main.codec
+          )
+            break;
+          if (resumesMain(identities[j + 1])) {
+            resume = j + 1;
+            break;
+          }
         }
       }
     }
     if (resume >= 0) {
-      for (let j = i; j < resume; j++)
-        for (let segment = 0; segment < groups[j].segmentCount; segment++)
-          removed.add(groups[j].firstSegment + segment);
+      for (let j = i; j < resume; j++) removeGroup(groups[j]);
       previous = resume;
       i = resume;
       stableDuration += groups[resume].duration;
-      stableSegments += groups[resume].segmentCount;
+      stableSegments += groups[resume].segments.length;
     } else {
-      previous = i;
-      stableGroups = 1;
-      stableDuration = groups[i].duration;
-      stableSegments = groups[i].segmentCount;
+      startTimelineAt(i);
     }
   }
+  // An exact copy of a verified insert can also appear before or after the main timeline.
+  groups.forEach((group, index) => {
+    if (confirmedRepeats.has(signatures[index])) removeGroup(group);
+  });
   return removed;
 }

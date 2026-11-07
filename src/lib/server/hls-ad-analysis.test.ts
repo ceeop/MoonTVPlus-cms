@@ -194,3 +194,34 @@ test('the analysis deadline returns a playable playlist and aborts outstanding m
     jest.useRealTimers();
   }
 });
+
+test('the deadline keeps a verified break filtered when an unrelated group stalls', async () => {
+  jest.useFakeTimers();
+  try {
+    const incompletePlaylist = content.replace(
+      '#EXT-X-ENDLIST',
+      '#EXT-X-DISCONTINUITY\n#EXTINF:20,\nslow.png\n#EXT-X-ENDLIST'
+    );
+    const fetchMock = fetch as jest.Mock;
+    const successfulProbe = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url: string) =>
+      url.endsWith('/slow.png')
+        ? new Promise(() => undefined)
+        : successfulProbe?.(url)
+    );
+    const result = filterUnmarkedHlsAds(
+      incompletePlaylist,
+      'https://partial.example/a.m3u8'
+    );
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(cancel).toHaveBeenCalledTimes(6);
+    jest.advanceTimersByTime(10001);
+    const filtered = await result;
+    expect(filtered).not.toContain('insert0.png');
+    expect(filtered).not.toContain('insert1.png');
+    expect(filtered).toContain('main3.png');
+    expect(filtered).toContain('slow.png');
+  } finally {
+    jest.useRealTimers();
+  }
+});
