@@ -1,25 +1,32 @@
-name: Sync upstream
+name: Sync upstream and publish Docker image
 
 on:
   workflow_dispatch:
   schedule:
     - cron: '17 */6 * * *'
-
-permissions:
-  contents: write
+  push:
+    branches: [custom]
 
 concurrency: sync-upstream
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    outputs:
+      revision: ${{ steps.source.outputs.revision }}
+      image: ${{ steps.source.outputs.image }}
+      publish: ${{ steps.registry.outputs.publish }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: custom
           fetch-depth: 0
 
       - name: Merge upstream main
+        if: github.event_name != 'push'
         run: |
           git fetch --no-tags https://github.com/mtvpls/MoonTVPlus.git refs/heads/main
           if git merge-base --is-ancestor FETCH_HEAD HEAD; then
@@ -29,5 +36,118 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-edit FETCH_HEAD
+          # Pause before committing, including when the merge could fast-forward.
+          git merge --no-ff --no-commit --no-edit FETCH_HEAD ||
+            git rev-parse --verify MERGE_HEAD >/dev/null
+          git restore --source=HEAD --staged --worktree -- .github/workflows
+          git diff --cached --exit-code HEAD -- .github/workflows
+          git commit --no-edit
           git push origin HEAD:refs/heads/custom
+
+      - name: Identify source revision
+        id: source
+        run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Check published image
+        id: registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.source.outputs.image }}
+          REVISION: ${{ steps.source.outputs.revision }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # Check both tags so a failed build or partial publish can be retried.
+          if latest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:latest") &&
+             current=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:sha-$REVISION") &&
+             [[ -n "$latest" && "$latest" == "$current" ]]; then
+            echo "Image is already published for $REVISION."
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.publish == 'true'
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.sync.outputs.revision }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push by digest
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.sync.outputs.revision }}
+          outputs: type=image,name=${{ needs.sync.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Save image digest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/$ARCH"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/${{ matrix.arch }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    needs: [sync, build]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish multi-platform image
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.sync.outputs.image }}
+          REVISION: ${{ needs.sync.outputs.revision }}
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:sha-$REVISION" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE@$(cat amd64)" "$IMAGE@$(cat arm64)"
