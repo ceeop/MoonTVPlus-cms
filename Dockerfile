@@ -69,6 +69,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/server.js ./server.js
 # Next standalone 只会追踪 Next 应用入口，不会自动包含自定义服务器额外 require 的源文件，
 # 因此需要显式复制该运行时模块，避免生产镜像启动时报 Cannot find module。
 COPY --from=builder --chown=nextjs:nodejs /app/src/lib/tv-remote-hub.js ./src/lib/tv-remote-hub.js
+COPY --from=builder --chown=nextjs:nodejs /app/src/lib/postgres-pool.js ./src/lib/postgres-pool.js
 # 从构建器中复制 public 和 .next/static 目录
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static

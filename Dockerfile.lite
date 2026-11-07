@@ -50,9 +50,11 @@ ENV OFFLINE_DOWNLOAD_DIR=/data
 # standalone 输出自带运行所需的最小服务端依赖
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
+COPY --from=builder --chown=nextjs:nodejs /app/migrations ./migrations
 COPY --from=builder --chown=nextjs:nodejs /app/start.js ./start.js
 # 保持与完整镜像一致：如果运行时 server.js 引用了电视遥控 hub，确保该模块存在。
 COPY --from=builder --chown=nextjs:nodejs /app/src/lib/tv-remote-hub.js ./src/lib/tv-remote-hub.js
+COPY --from=builder --chown=nextjs:nodejs /app/src/lib/postgres-pool.js ./src/lib/postgres-pool.js
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 

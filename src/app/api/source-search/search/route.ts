@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
-import { API_CONFIG, getAvailableApiSites } from '@/lib/config';
+import {
+  catalogScope,
+  catalogSettings,
+  catalogSourceEnabled,
+} from '@/lib/catalog/model';
+import { getCatalogStore } from '@/lib/catalog/store';
+import { API_CONFIG, getAvailableApiSites, getConfig } from '@/lib/config';
 import { parseJsonLosslessIntegers } from '@/lib/json';
 import { SearchResult } from '@/lib/types';
 
@@ -39,17 +45,11 @@ export async function GET(request: NextRequest) {
   const page = searchParams.get('page') || '1';
 
   if (!sourceKey) {
-    return NextResponse.json(
-      { error: '缺少参数: source' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: '缺少参数: source' }, { status: 400 });
   }
 
   if (!keyword || keyword.trim() === '') {
-    return NextResponse.json(
-      { error: '缺少参数: keyword' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: '缺少参数: keyword' }, { status: 400 });
   }
 
   try {
@@ -64,8 +64,26 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    if (
+      searchParams.get('online') !== '1' &&
+      catalogSourceEnabled(await getConfig(), targetSite.key)
+    ) {
+      const config = await getConfig();
+      const data = await getCatalogStore().browse([targetSite], {
+        query: keyword,
+        page: Number(page) || 1,
+        ...catalogScope(catalogSettings(config)),
+        excludeRestricted: !config.SiteConfig.DisableYellowFilter,
+      });
+      return NextResponse.json(data, {
+        headers: { 'Cache-Control': 'private, no-store' },
+      });
+    }
+
     // 请求搜索结果
-    const searchUrl = `${targetSite.api}?ac=videolist&wd=${encodeURIComponent(keyword)}&pg=${page}`;
+    const searchUrl = `${targetSite.api}?ac=videolist&wd=${encodeURIComponent(
+      keyword
+    )}&pg=${page}`;
     const searchResponse = await fetch(searchUrl, {
       headers: API_CONFIG.search.headers,
       signal: AbortSignal.timeout(10000),

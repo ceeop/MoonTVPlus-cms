@@ -30,7 +30,7 @@ new_sqlite_classes = ["WatchRoomHub"]
 # 定时任务（对齐 vercel.json 的 "0 1 * * *"）。
 # 触发器要想生效，入口必须导出 scheduled —— 见 cloudflare-worker.ts。
 [triggers]
-crons = ["0 1 * * *"]
+crons = ["0 1 * * *", "*/5 * * * *"]
 
 # 注意：[vars] 必须留在文件最后。
 # cloudflare-deploy.yml 是用 `echo >> wrangler.toml` 追加环境变量的，

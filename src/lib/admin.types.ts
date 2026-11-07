@@ -1,3 +1,6 @@
+import type { CatalogCategoryConfig } from './catalog/category-config';
+import type { TVBoxSettings } from './tvbox/types';
+
 /** 备用 OpenList 源（可添加无限条，路径用「源名@路径」指定） */
 export interface OpenListExtraSource {
   name: string; // 源名字，唯一、非空、不含 @
@@ -7,6 +10,16 @@ export interface OpenListExtraSource {
 }
 
 export interface AdminConfig {
+  TVBoxConfig?: TVBoxSettings;
+  CatalogConfig?: CatalogCategoryConfig & {
+    Enabled: boolean;
+    SourceKeys: string[];
+    DefaultSourceKey?: string;
+    IntervalMinutes: number;
+    CleanupEnabled?: boolean;
+    RetentionMonths?: number;
+    Kinds?: Array<'movie' | 'tv' | 'anime' | 'variety' | 'other'>;
+  };
   ConfigSubscribtion: {
     URL: string;
     AutoUpdate: boolean;
@@ -28,6 +41,7 @@ export interface AdminConfig {
     DoubanImageProxyType: string;
     DoubanImageProxy: string;
     DisableYellowFilter: boolean;
+    M3u8Only?: boolean;
     FluidSearch: boolean;
     // 弹幕配置
     DanmakuSourceType?: 'builtin' | 'custom';
@@ -41,11 +55,7 @@ export interface AdminConfig {
     // TMDB 图片默认地址：用户未在本地数据源设置中配置时，图片默认使用该地址
     TMDBImageBaseUrl?: string;
     // 动漫/Bangumi配置
-    BangumiDataSource?:
-      | 'direct'
-      | 'server-proxy'
-      | 'custom-baseurl'
-      | 'sakura';
+    BangumiDataSource?: 'direct' | 'server-proxy' | 'custom-baseurl' | 'sakura';
     BangumiApiBaseUrl?: string;
     BangumiImageBaseUrl?: string;
     BangumiProxy?: string;

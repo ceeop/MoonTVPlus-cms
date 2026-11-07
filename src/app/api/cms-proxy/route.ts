@@ -11,6 +11,8 @@ import {
   setCachedMetaInfo,
 } from '@/lib/openlist-cache';
 import { getTMDBImageUrl } from '@/lib/tmdb.search';
+import { tvboxBaseUrl } from '@/lib/tvbox/access';
+import { processTVBoxPlayLines } from '@/lib/tvbox/cms';
 import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'nodejs';
@@ -25,12 +27,11 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const apiUrl = searchParams.get('api');
     const yellowFilter = searchParams.get('yellowFilter') === 'true';
+    const adFilter = searchParams.get('adFilter') === 'true';
+    const m3u8Only = (await getConfig(true)).SiteConfig?.M3u8Only === true;
 
     if (!apiUrl) {
-      return NextResponse.json(
-        { error: '缺少必要参数: api' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: '缺少必要参数: api' }, { status: 400 });
     }
 
     // 特殊处理 openlist
@@ -41,9 +42,11 @@ export async function GET(request: NextRequest) {
     // 构建完整的 API 请求 URL，包含所有查询参数
     const targetUrl = new URL(apiUrl);
 
-    // 将所有查询参数（除了 api）转发到目标 API
+    // 本站过滤参数留在代理层，其余查询参数转发到目标 API。
     searchParams.forEach((value, key) => {
-      if (key !== 'api') {
+      if (
+        !['api', 'adFilter', 'yellowFilter', 'source', 'm3u8Only'].includes(key)
+      ) {
         targetUrl.searchParams.append(key, value);
       }
     });
@@ -57,8 +60,9 @@ export async function GET(request: NextRequest) {
     try {
       const response = await fetch(targetUrl.toString(), {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          Accept: 'application/json',
         },
         signal: controller.signal,
       });
@@ -66,7 +70,11 @@ export async function GET(request: NextRequest) {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        console.error('CMS API 请求失败:', response.status, response.statusText);
+        console.error(
+          'CMS API 请求失败:',
+          response.status,
+          response.statusText
+        );
         return NextResponse.json(
           { error: '请求 CMS API 失败' },
           { status: response.status }
@@ -86,20 +94,20 @@ export async function GET(request: NextRequest) {
 
       // 获取当前请求的 origin
       // 优先级：SITE_BASE 环境变量 > 从请求头构建
-      let origin = process.env.SITE_BASE;
-
-      if (!origin) {
-        // 从请求头中获取 Host 和协议
-        const host = request.headers.get('host') || request.headers.get('x-forwarded-host');
-        const proto = request.headers.get('x-forwarded-proto') ||
-                      (host?.includes('localhost') || host?.includes('127.0.0.1') ? 'http' : 'https');
-        origin = `${proto}://${host}`;
-      }
+      const origin = tvboxBaseUrl(request);
 
       console.log('CMS 代理 origin:', origin);
 
       // 处理返回数据，替换播放链接为代理链接
-      const processedData = processCmsResponse(data, origin, yellowFilter);
+      const source = searchParams.get('source') || '';
+      const processedData = processCmsResponse(
+        data,
+        origin,
+        yellowFilter,
+        adFilter,
+        source,
+        m3u8Only
+      );
 
       return NextResponse.json(processedData, {
         headers: {
@@ -112,15 +120,11 @@ export async function GET(request: NextRequest) {
 
       if (fetchError.name === 'AbortError') {
         console.error('CMS API 请求超时:', targetUrl.toString());
-        return NextResponse.json(
-          { error: '请求超时' },
-          { status: 504 }
-        );
+        return NextResponse.json({ error: '请求超时' }, { status: 504 });
       }
 
       throw fetchError;
     }
-
   } catch (error) {
     console.error('CMS 代理失败:', error);
     return NextResponse.json(
@@ -133,7 +137,14 @@ export async function GET(request: NextRequest) {
 /**
  * 处理 CMS API 返回数据，将播放链接替换为代理链接
  */
-function processCmsResponse(data: any, proxyOrigin: string, yellowFilter: boolean): any {
+function processCmsResponse(
+  data: any,
+  proxyOrigin: string,
+  yellowFilter: boolean,
+  adFilter: boolean,
+  source: string,
+  m3u8Only: boolean
+): any {
   if (!data || typeof data !== 'object') {
     return data;
   }
@@ -143,16 +154,21 @@ function processCmsResponse(data: any, proxyOrigin: string, yellowFilter: boolea
 
   if (yellowFilter) {
     if (processedData.class && Array.isArray(processedData.class)) {
-      processedData.class = processedData.class.filter((item: any) => !matchesYellowContent(item?.type_name));
+      processedData.class = processedData.class.filter(
+        (item: any) => !matchesYellowContent(item?.type_name)
+      );
     }
 
     if (processedData.list && Array.isArray(processedData.list)) {
-      processedData.list = processedData.list.filter((item: any) => !matchesYellowContent(
-        item?.vod_name,
-        item?.type_name,
-        item?.vod_remarks,
-        item?.vod_content,
-      ));
+      processedData.list = processedData.list.filter(
+        (item: any) =>
+          !matchesYellowContent(
+            item?.vod_name,
+            item?.type_name,
+            item?.vod_remarks,
+            item?.vod_content
+          )
+      );
 
       if (typeof processedData.total === 'number') {
         processedData.total = processedData.list.length;
@@ -163,18 +179,22 @@ function processCmsResponse(data: any, proxyOrigin: string, yellowFilter: boolea
     }
   }
 
-  // 获取 M3U8 代理 token
-  const proxyToken = process.env.NEXT_PUBLIC_PROXY_M3U8_TOKEN || '';
-  const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
-
   // 处理列表数据
   if (processedData.list && Array.isArray(processedData.list)) {
     processedData.list = processedData.list.map((item: any, index: number) => {
       // 只处理有播放地址的项目
-      if (item.vod_play_url && typeof item.vod_play_url === 'string') {
+      if ((adFilter || m3u8Only) && typeof item.vod_play_url === 'string') {
         try {
           const originalUrl = item.vod_play_url;
-          item.vod_play_url = processPlayUrlString(item.vod_play_url, item.vod_play_from || '', proxyOrigin, tokenParam);
+          Object.assign(
+            item,
+            processTVBoxPlayLines(
+              item.vod_play_url,
+              String(item.vod_play_from || ''),
+              proxyOrigin,
+              { source, adFilter, m3u8Only }
+            )
+          );
 
           // 只为第一个视频输出详细日志
           if (index === 0) {
@@ -194,89 +214,24 @@ function processCmsResponse(data: any, proxyOrigin: string, yellowFilter: boolea
       }
       return item;
     });
+    if (m3u8Only)
+      processedData.list = processedData.list.filter(
+        (item: any) =>
+          typeof item.vod_play_url !== 'string' || item.vod_play_url.trim()
+      );
   }
 
   return processedData;
 }
 
 function matchesYellowContent(...values: Array<string | undefined>): boolean {
-  const normalized = values
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
+  const normalized = values.filter(Boolean).join(' ').toLowerCase();
 
   if (!normalized) {
     return false;
   }
 
   return yellowWords.some((word) => normalized.includes(word.toLowerCase()));
-}
-
-/**
- * 处理播放地址字符串
- * 格式: 第01集$url1#第02集$url2#...
- */
-function processPlayUrlString(playUrl: string, playFrom: string, proxyOrigin: string, tokenParam: string): string {
-  if (!playUrl) return playUrl;
-
-  // 按 $ 分割，分别处理每个播放源
-  const playSources = playUrl.split('$$$');
-
-  return playSources.map(source => {
-    // 处理每个播放源的剧集列表
-    const episodes = source.split('#');
-
-    return episodes.map(episode => {
-      // 格式: 第01集$url 或 url
-      // 使用 indexOf 找到第一个 $ 的位置
-      const dollarIndex = episode.indexOf('$');
-
-      if (dollarIndex > 0) {
-        // 有标题的格式: 第01集$url 或 第01集$url$其他
-        const title = episode.substring(0, dollarIndex);
-        const rest = episode.substring(dollarIndex + 1);
-
-        // 检查后面是否还有 $，如果有就保留
-        const nextDollarIndex = rest.indexOf('$');
-        if (nextDollarIndex > 0) {
-          // 格式: 第01集$url$其他
-          const url = rest.substring(0, nextDollarIndex);
-          const other = rest.substring(nextDollarIndex);
-          const processedUrl = processUrl(url.trim(), playFrom, proxyOrigin, tokenParam);
-          return `${title}$${processedUrl}${other}`;
-        } else {
-          // 格式: 第01集$url
-          const processedUrl = processUrl(rest.trim(), playFrom, proxyOrigin, tokenParam);
-          return `${title}$${processedUrl}`;
-        }
-      } else if (episode.trim()) {
-        // 只有 URL 的格式
-        const processedUrl = processUrl(episode.trim(), playFrom, proxyOrigin, tokenParam);
-        return processedUrl;
-      }
-
-      return episode;
-    }).join('#');
-  }).join('$$$');
-}
-
-/**
- * 处理单个播放地址
- */
-function processUrl(url: string, playFrom: string, proxyOrigin: string, tokenParam: string): string {
-  if (!url) return url;
-
-  // 只处理 m3u8 链接
-  if (url.includes('.m3u8')) {
-    // 提取播放源类型（如果有的话）
-    const source = playFrom ? `&source=${encodeURIComponent(playFrom)}` : '';
-
-    // 将 m3u8 链接替换为代理链接
-    return `${proxyOrigin}/api/proxy-m3u8?url=${encodeURIComponent(url)}${source}${tokenParam}`;
-  }
-
-  // 非 m3u8 链接不处理
-  return url;
 }
 
 /**
@@ -290,7 +245,12 @@ async function handleOpenListProxy(request: NextRequest) {
   const config = await getConfig();
   const openListConfig = config.OpenListConfig;
 
-  if (!openListConfig || !openListConfig.URL || !openListConfig.Username || !openListConfig.Password) {
+  if (
+    !openListConfig ||
+    !openListConfig.URL ||
+    !openListConfig.Username ||
+    !openListConfig.Password
+  ) {
     return NextResponse.json(
       { code: 0, msg: 'OpenList 未配置', list: [] },
       { status: 200 }
@@ -367,7 +327,11 @@ async function handleOpenListProxy(request: NextRequest) {
     // 获取视频详情
     try {
       const detailResponse = await fetch(
-        `${request.headers.get('x-forwarded-proto') || 'http'}://${request.headers.get('host')}/api/openlist/detail?folder=${encodeURIComponent(folderName)}`
+        `${
+          request.headers.get('x-forwarded-proto') || 'http'
+        }://${request.headers.get(
+          'host'
+        )}/api/openlist/detail?folder=${encodeURIComponent(folderName)}`
       );
 
       if (!detailResponse.ok) {
@@ -419,16 +383,14 @@ async function handleOpenListProxy(request: NextRequest) {
   }
 
   // 默认返回所有视频
-  const results = Object.entries(metaInfo.folders).map(
-    ([key, info]) => ({
-      vod_id: key,
-      vod_name: info.title,
-      vod_pic: getTMDBImageUrl(info.poster_path),
-      vod_remarks: info.media_type === 'movie' ? '电影' : '剧集',
-      vod_year: info.release_date.split('-')[0] || '',
-      type_name: info.media_type === 'movie' ? '电影' : '电视剧',
-    })
-  );
+  const results = Object.entries(metaInfo.folders).map(([key, info]) => ({
+    vod_id: key,
+    vod_name: info.title,
+    vod_pic: getTMDBImageUrl(info.poster_path),
+    vod_remarks: info.media_type === 'movie' ? '电影' : '剧集',
+    vod_year: info.release_date.split('-')[0] || '',
+    type_name: info.media_type === 'movie' ? '电影' : '电视剧',
+  }));
 
   return NextResponse.json({
     code: 1,

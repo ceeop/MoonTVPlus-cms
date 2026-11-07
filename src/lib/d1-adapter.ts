@@ -31,6 +31,7 @@ export interface D1Result<T = any> {
 
 // 统一的数据库接口
 export interface DatabaseAdapter {
+  readonly dialect?: 'sqlite' | 'postgres';
   prepare(query: string): D1PreparedStatement;
   batch?(statements: D1PreparedStatement[]): Promise<D1Result[]>;
   exec?(query: string): void;

@@ -31,6 +31,7 @@ import {
   createAdFilteringHlsLoader,
   loadCustomAdFilterCode,
 } from '@/lib/hls-ad-filter.client';
+import { prepareHlsPlaybackUrl } from '@/lib/hls-playback-url';
 import { appendSpecialSourceParam } from '@/lib/special-source.client';
 import type { SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8 } from '@/lib/utils';
@@ -505,6 +506,8 @@ function EpisodeSlide({
         const { default: Hls } = await import('hls.js');
         if (cancelled) return;
         if (Hls.isSupported()) {
+          if (adFilter) customCodeRef.current = await loadCustomAdFilterCode();
+          if (cancelled) return;
           const loader = adFilter
             ? createAdFilteringHlsLoader(
                 Hls,
@@ -523,12 +526,18 @@ function EpisodeSlide({
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             if (playRef.current) video.play().catch(() => {});
           });
-          hls.loadSource(activeUrl);
+          hls.loadSource(prepareHlsPlaybackUrl(activeUrl, {
+            origin: window.location.origin, source, adBlock: adFilter,
+            token: process.env.NEXT_PUBLIC_PROXY_M3U8_TOKEN || '',
+          }));
           hls.attachMedia(video);
           return;
         }
         if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          video.src = activeUrl;
+          video.src = prepareHlsPlaybackUrl(activeUrl, {
+            origin: window.location.origin, source, adBlock: adFilter,
+            token: process.env.NEXT_PUBLIC_PROXY_M3U8_TOKEN || '', serverFilter: true,
+          });
           if (playRef.current) video.play().catch(() => {});
           return;
         }

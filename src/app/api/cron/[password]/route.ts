@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { checkAnimeSubscriptions } from '@/lib/anime-subscription';
 import { getConfig, refineConfig } from '@/lib/config';
+import { collectCatalog } from '@/lib/catalog/collector';
 import { fetchConfigSubscription } from '@/lib/config-subscription';
 import { db, getStorage } from '@/lib/db';
 import { EmailService } from '@/lib/email.service';
@@ -233,6 +234,7 @@ async function cronJob() {
 
   // 其余任务并行执行
   await Promise.all([
+    collectCatalog(),
     refreshAllLiveChannels(),
     refreshOpenList(),
     refreshRecordAndFavorites(),

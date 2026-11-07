@@ -43,9 +43,11 @@ export default {
   // 定时任务：直接内部打一次 /api/cron/<password>。
   // wrangler.toml 里 CRON_WAIT_FOR_COMPLETION="true"，路由会等任务跑完再返回，
   // 所以这里 await（不要用 ctx.waitUntil —— 那是"先返回后台继续"的语义）。
-  async scheduled(_event: unknown, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: { cron?: string }, env: Env, ctx: ExecutionContext): Promise<void> {
     const password = env.CRON_PASSWORD || 'mtvpls';
-    const url = new URL(`/api/cron/${password}`, 'https://internal.invalid');
+    const catalogTick = event.cron === '*/5 * * * *';
+    if (catalogTick && !env.CRON_PASSWORD) return;
+    const url = new URL(`/api/cron/${encodeURIComponent(password)}${catalogTick ? '/catalog' : ''}`, 'https://internal.invalid');
     await openNextWorker.fetch(new Request(url), env, ctx);
   },
 };

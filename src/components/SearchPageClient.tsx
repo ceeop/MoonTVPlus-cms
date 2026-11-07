@@ -26,6 +26,7 @@ import { createPortal } from 'react-dom';
 
 import { isAnimeCategoryText } from '@/lib/anime-keyword-expr';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
+import { loadTraditionalToSimplifiedConverter } from '@/lib/danmaku/traditional-to-simplified';
 import {
   addSearchHistory,
   clearSearchHistory,
@@ -33,12 +34,13 @@ import {
   getSearchHistory,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
-import { SearchResult } from '@/lib/types';
+import { mergeSearchResults } from '@/lib/search-results';
 import {
   appendSpecialSourceParam,
   isSpecialSourceContext,
   SPECIAL_SOURCE_PATH,
 } from '@/lib/special-source.client';
+import { SearchResult } from '@/lib/types';
 import { processImageUrl } from '@/lib/utils';
 
 import AcgSearch from '@/components/AcgSearch';
@@ -54,7 +56,6 @@ import SearchResultFilter, {
 import SearchSuggestions from '@/components/SearchSuggestions';
 import VideoCard, { VideoCardHandle } from '@/components/VideoCard';
 import VirtualScrollableGrid from '@/components/VirtualScrollableGrid';
-import { loadTraditionalToSimplifiedConverter } from '@/lib/danmaku/traditional-to-simplified';
 
 const PANSOU_CLOUD_TYPE_OPTIONS = Object.entries(CLOUD_TYPE_NAMES).map(
   ([value, label]) => ({ value, label })
@@ -67,7 +68,11 @@ type SearchCachePayload = {
   updatedAt: number;
 };
 
-export function SearchPageClient({ searchBase = '/search' }: { searchBase?: string }) {
+export function SearchPageClient({
+  searchBase = '/search',
+}: {
+  searchBase?: string;
+}) {
   // 特殊源入口（/under）只提供影视搜索，不挂网盘/磁力 tab
   const isSpecialEntry = searchBase === SPECIAL_SOURCE_PATH;
   // 搜索历史
@@ -104,6 +109,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
   const [privateLibrarySearchEnabled, setPrivateLibrarySearchEnabled] =
     useState(false);
   const [featureFlagsReady, setFeatureFlagsReady] = useState(false);
+  const [catalogEnabled, setCatalogEnabled] = useState(false);
   // 繁体转简体转换器
   const converterRef = useRef<((text: string) => string) | null>(null);
   // 转换器是否已初始化
@@ -135,7 +141,10 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
     >
   >(new Map());
   // 强制刷新状态
-  const [forceRefresh, setForceRefresh] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const refreshVersionRef = useRef(0);
+  const [hasCatalogResults, setHasCatalogResults] = useState(false);
+  const [searchInterrupted, setSearchInterrupted] = useState(false);
   // 是否使用了缓存结果
   const [isFromCache, setIsFromCache] = useState(false);
   // 精确搜索开关
@@ -151,6 +160,8 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
   const getCacheKey = (query: string) => {
     const suffixParts = [
       isSpecialSourceContext() ? 'special' : '',
+      'unified',
+      typeof window !== 'undefined' && (window as any).RUNTIME_CONFIG?.M3U8_ONLY ? 'm3u8' : '',
       privateLibraryOnly ? 'private' : '',
     ].filter(Boolean);
     const suffix = suffixParts.length > 0 ? `_${suffixParts.join('_')}` : '';
@@ -198,10 +209,13 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
 
   const savePartialCacheForPlayback = () => {
     const query = currentQueryRef.current.trim();
-    if (!query || !eventSourceRef.current || !isLoading) return;
+    if (!query || (!isLoading && !searchInterrupted)) return;
 
-    const snapshot = searchResults.concat(pendingResultsRef.current);
-    if (snapshot.length > 20) {
+    const snapshot = mergeSearchResults(
+      searchResults,
+      pendingResultsRef.current
+    );
+    if (snapshot.length > 0) {
       setCachedResults(query, snapshot, 'partial');
     }
   };
@@ -837,7 +851,10 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
 
   useEffect(() => {
     if (typeof window !== 'undefined' && privateLibraryOnlyLoadedRef.current) {
-      localStorage.setItem('searchPrivateLibraryOnly', String(privateLibraryOnly));
+      localStorage.setItem(
+        'searchPrivateLibraryOnly',
+        String(privateLibraryOnly)
+      );
     }
   }, [privateLibraryOnly]);
 
@@ -890,9 +907,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
     }
 
     return appendSpecialSourceParam(
-      `/play?source=${params.source}&id=${
-        params.id
-      }&title=${encodeURIComponent(
+      `/play?source=${params.source}&id=${params.id}&title=${encodeURIComponent(
         params.title.trim()
       )}${yearParam}${preferParam}${queryParam}${typeParam}`
     );
@@ -1075,6 +1090,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
     const authInfo = getAuthInfoFromBrowserCookie();
     setUserRole(authInfo?.role || null);
     const runtimeConfig = (window as any).RUNTIME_CONFIG || {};
+    setCatalogEnabled(runtimeConfig.CATALOG_ENABLED === true);
     setNetdiskSearchEnabled(!!runtimeConfig.NETDISK_SEARCH_ENABLED);
     setMagnetSearchEnabled(!!runtimeConfig.MAGNET_SEARCH_ENABLED);
     // 与首页口径一致：未显式关闭即为启用
@@ -1253,6 +1269,11 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
     }
 
     currentQueryRef.current = query.trim();
+    const forceRefresh = refreshVersion !== refreshVersionRef.current;
+    refreshVersionRef.current = refreshVersion;
+    const abortController = new AbortController();
+    let cancelled = false;
+    let activeEventSource: EventSource | null = null;
 
     const typeParam = searchParams.get('type');
     const isVideoSearchType = !typeParam || typeParam === 'video';
@@ -1283,9 +1304,6 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
         setShowResults(false);
         setShowSuggestions(false);
       }
-      if (forceRefresh) {
-        setForceRefresh(false);
-      }
       return;
     }
 
@@ -1315,11 +1333,12 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
       // 如果是强制刷新，清除缓存
       if (forceRefresh) {
         clearCachedResults(trimmed);
-        setForceRefresh(false);
       }
 
       // 开始新搜索时，重置缓存标记
       setIsFromCache(false);
+      setHasCatalogResults(false);
+      setSearchInterrupted(false);
 
       // 新搜索：关闭旧连接并清空结果
       if (eventSourceRef.current) {
@@ -1354,6 +1373,9 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
         }
       }
 
+      // 片库与各源统一渐进展示，确保片库结果不被传统搜索阻塞。
+      if (catalogEnabled && !privateLibraryOnly) currentFluidSearch = true;
+
       // 如果读取的配置与当前状态不同，更新状态
       if (currentFluidSearch !== useFluidSearch) {
         setUseFluidSearch(currentFluidSearch);
@@ -1362,17 +1384,26 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
       if (currentFluidSearch) {
         // 流式搜索：打开新的流式连接
         const searchUrl = `/api/search/ws?q=${encodeURIComponent(trimmed)}${
-          privateLibraryOnly ? '&privateOnly=1' : ''
-        }`;
+          forceRefresh ? '&fresh=1' : ''
+        }${privateLibraryOnly ? '&privateOnly=1' : ''}`;
         const es = new EventSource(appendSpecialSourceParam(searchUrl));
+        activeEventSource = es;
         eventSourceRef.current = es;
 
         es.onmessage = (event) => {
           if (!event.data) return;
           try {
             const payload = JSON.parse(event.data);
-            if (currentQueryRef.current !== trimmed) return;
+            if (cancelled || eventSourceRef.current !== es) return;
             switch (payload.type) {
+              case 'catalog_result': {
+                const results: SearchResult[] = Array.isArray(payload.results)
+                  ? payload.results
+                  : [];
+                setHasCatalogResults(results.length > 0);
+                setSearchResults(sortBatchForNoOrder(results));
+                break;
+              }
               case 'start':
                 setTotalSources(payload.totalSources || 0);
                 setCompletedSources(0);
@@ -1398,7 +1429,9 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                       const toAppend = pendingResultsRef.current;
                       pendingResultsRef.current = [];
                       startTransition(() => {
-                        setSearchResults((prev) => prev.concat(toAppend));
+                        setSearchResults((prev) =>
+                          mergeSearchResults(prev, toAppend)
+                        );
                       });
                       flushTimerRef.current = null;
                     }, 80);
@@ -1410,7 +1443,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                 setCompletedSources((prev) => prev + 1);
                 break;
               case 'complete':
-                setCompletedSources(payload.completedSources || totalSources);
+                setCompletedSources(payload.completedSources ?? 0);
                 // 完成前确保将缓冲写入
                 if (pendingResultsRef.current.length > 0) {
                   const toAppend = pendingResultsRef.current;
@@ -1421,7 +1454,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                   }
                   startTransition(() => {
                     setSearchResults((prev) => {
-                      const newResults = prev.concat(toAppend);
+                      const newResults = mergeSearchResults(prev, toAppend);
                       // 缓存完整的搜索结果
                       setCachedResults(trimmed, newResults);
                       return newResults;
@@ -1447,6 +1480,8 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
         };
 
         es.onerror = () => {
+          if (cancelled || eventSourceRef.current !== es) return;
+          setSearchInterrupted(true);
           setIsLoading(false);
           // 错误时也清空缓冲
           if (pendingResultsRef.current.length > 0) {
@@ -1457,7 +1492,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
               flushTimerRef.current = null;
             }
             startTransition(() => {
-              setSearchResults((prev) => prev.concat(toAppend));
+              setSearchResults((prev) => mergeSearchResults(prev, toAppend));
             });
           }
           try {
@@ -1470,12 +1505,14 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
       } else {
         // 传统搜索：使用普通接口
         const searchUrl = `/api/search?q=${encodeURIComponent(trimmed)}${
-          privateLibraryOnly ? '&privateOnly=1' : ''
-        }`;
-        fetch(appendSpecialSourceParam(searchUrl))
+          forceRefresh ? '&fresh=1' : ''
+        }${privateLibraryOnly ? '&privateOnly=1' : ''}`;
+        fetch(appendSpecialSourceParam(searchUrl), {
+          signal: abortController.signal,
+        })
           .then((response) => response.json())
           .then((data) => {
-            if (currentQueryRef.current !== trimmed) return;
+            if (cancelled) return;
 
             if (data.results && Array.isArray(data.results)) {
               const activeYearOrder =
@@ -1494,6 +1531,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
             setIsLoading(false);
           })
           .catch(() => {
+            if (cancelled) return;
             setIsLoading(false);
           });
       }
@@ -1505,9 +1543,22 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
       setShowResults(false);
       setShowSuggestions(false);
     }
+    return () => {
+      cancelled = true;
+      abortController.abort();
+      activeEventSource?.close();
+      if (eventSourceRef.current === activeEventSource)
+        eventSourceRef.current = null;
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      pendingResultsRef.current = [];
+    };
   }, [
     searchParams,
-    forceRefresh,
+    refreshVersion,
+    catalogEnabled,
     converterReady,
     privateLibraryOnlyReady,
     privateLibraryOnly,
@@ -1853,7 +1904,9 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                   setShowResults(true);
                   setShowSuggestions(false);
                   router.push(
-                    `${searchBase}?q=${encodeURIComponent(trimmed)}&type=${activeTab}`
+                    `${searchBase}?q=${encodeURIComponent(
+                      trimmed
+                    )}&type=${activeTab}`
                   );
                   if (activeTab === 'pansou') {
                     setTriggerPansouSearch((prev) => !prev);
@@ -2033,7 +2086,6 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
               </div>
             </div>
           )}
-
         </div>
 
         {pansouCloudFilterOpen &&
@@ -2123,14 +2175,36 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                               </span>
                             )}
                           </span>
-                          {!isFromCache && totalSources > 0 && useFluidSearch && (
-                            <span className='inline-flex items-center gap-1'>
-                              源 {completedSources}/{totalSources}
-                              {isLoading && (
-                                <span className='inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-green-500'></span>
-                              )}
-                            </span>
-                          )}
+                          {!isFromCache &&
+                            useFluidSearch &&
+                            (isLoading ||
+                              totalSources > 0 ||
+                              searchInterrupted) && (
+                              <span
+                                role='status'
+                                className='inline-flex flex-wrap items-center gap-1'
+                              >
+                                {isLoading && hasCatalogResults && (
+                                  <span>片库结果已显示 ·</span>
+                                )}
+                                {searchInterrupted
+                                  ? '部分来源搜索中断，可刷新重试'
+                                  : isLoading
+                                  ? '正在搜索各源'
+                                  : '各源搜索完成'}
+                                {totalSources > 0 && (
+                                  <span>
+                                    {completedSources}/{totalSources}
+                                  </span>
+                                )}
+                                {isLoading && (
+                                  <span
+                                    aria-hidden='true'
+                                    className='inline-block h-3 w-3 animate-spin motion-reduce:animate-none rounded-full border-2 border-gray-300 border-t-green-500'
+                                  ></span>
+                                )}
+                              </span>
+                            )}
                         </span>
                       </h2>
                     </div>
@@ -2138,7 +2212,7 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                       {searchQuery && (
                         <button
                           onClick={() => {
-                            setForceRefresh(true);
+                            setRefreshVersion((version) => version + 1);
                           }}
                           disabled={isLoading}
                           className='flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-green-50 hover:text-green-600 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-700/50 dark:hover:text-green-400'
@@ -2208,7 +2282,9 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                                 className='peer sr-only'
                                 checked={viewMode === 'agg'}
                                 onChange={() =>
-                                  setViewMode(viewMode === 'agg' ? 'all' : 'agg')
+                                  setViewMode(
+                                    viewMode === 'agg' ? 'all' : 'agg'
+                                  )
                                 }
                               />
                               <div className='h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-green-500 dark:bg-gray-600'></div>
@@ -2502,77 +2578,77 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
                 <ContinueWatching />
               )}
               {searchHistory.length > 0 && (
-            // 搜索历史
-            <section className='mb-12'>
-              <h2 className='mb-4 text-xl font-bold text-gray-800 text-left dark:text-gray-200'>
-                搜索历史
-                {searchHistory.length > 0 && (
-                  <button
-                    onClick={() => {
-                      clearSearchHistory(); // 事件监听会自动更新界面
-                    }}
-                    className='ml-3 text-sm text-gray-500 hover:text-red-500 transition-colors dark:text-gray-400 dark:hover:text-red-500'
-                  >
-                    清空
-                  </button>
-                )}
-              </h2>
-              <div className='flex flex-wrap gap-2'>
-                {searchHistory.map((item) => (
-                  <div key={item} className='relative group'>
-                    <button
-                      onClick={() => {
-                        setSearchQuery(item);
-                        setShowResults(true);
-                        // 立即设置加载状态，避免显示"未找到相关结果"
-                        setIsLoading(true);
+                // 搜索历史
+                <section className='mb-12'>
+                  <h2 className='mb-4 text-xl font-bold text-gray-800 text-left dark:text-gray-200'>
+                    搜索历史
+                    {searchHistory.length > 0 && (
+                      <button
+                        onClick={() => {
+                          clearSearchHistory(); // 事件监听会自动更新界面
+                        }}
+                        className='ml-3 text-sm text-gray-500 hover:text-red-500 transition-colors dark:text-gray-400 dark:hover:text-red-500'
+                      >
+                        清空
+                      </button>
+                    )}
+                  </h2>
+                  <div className='flex flex-wrap gap-2'>
+                    {searchHistory.map((item) => (
+                      <div key={item} className='relative group'>
+                        <button
+                          onClick={() => {
+                            setSearchQuery(item);
+                            setShowResults(true);
+                            // 立即设置加载状态，避免显示"未找到相关结果"
+                            setIsLoading(true);
 
-                        // 根据当前选项卡执行不同的搜索
-                        if (activeTab === 'video') {
-                          // 影视搜索
-                          router.push(
-                            `${searchBase}?q=${encodeURIComponent(
-                              item.trim()
-                            )}&type=video`
-                          );
-                        } else if (activeTab === 'pansou') {
-                          // 网盘搜索
-                          router.push(
-                            `${searchBase}?q=${encodeURIComponent(
-                              item.trim()
-                            )}&type=pansou`
-                          );
-                          setTriggerPansouSearch((prev) => !prev);
-                        } else if (activeTab === 'acg') {
-                          // ACG 磁力搜索
-                          router.push(
-                            `${searchBase}?q=${encodeURIComponent(
-                              item.trim()
-                            )}&type=acg`
-                          );
-                          setTriggerAcgSearch((prev) => !prev);
-                        }
-                      }}
-                      className='px-4 py-2 bg-gray-500/10 hover:bg-gray-300 rounded-full text-sm text-gray-700 transition-colors duration-200 dark:bg-gray-700/50 dark:hover:bg-gray-600 dark:text-gray-300'
-                    >
-                      {item}
-                    </button>
-                    {/* 删除按钮 */}
-                    <button
-                      aria-label='删除搜索历史'
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        deleteSearchHistory(item); // 事件监听会自动更新界面
-                      }}
-                      className='absolute -top-1 -right-1 w-4 h-4 opacity-0 group-hover:opacity-100 bg-gray-400 hover:bg-red-500 text-white rounded-full flex items-center justify-center text-[10px] transition-colors'
-                    >
-                      <X className='w-3 h-3' />
-                    </button>
+                            // 根据当前选项卡执行不同的搜索
+                            if (activeTab === 'video') {
+                              // 影视搜索
+                              router.push(
+                                `${searchBase}?q=${encodeURIComponent(
+                                  item.trim()
+                                )}&type=video`
+                              );
+                            } else if (activeTab === 'pansou') {
+                              // 网盘搜索
+                              router.push(
+                                `${searchBase}?q=${encodeURIComponent(
+                                  item.trim()
+                                )}&type=pansou`
+                              );
+                              setTriggerPansouSearch((prev) => !prev);
+                            } else if (activeTab === 'acg') {
+                              // ACG 磁力搜索
+                              router.push(
+                                `${searchBase}?q=${encodeURIComponent(
+                                  item.trim()
+                                )}&type=acg`
+                              );
+                              setTriggerAcgSearch((prev) => !prev);
+                            }
+                          }}
+                          className='px-4 py-2 bg-gray-500/10 hover:bg-gray-300 rounded-full text-sm text-gray-700 transition-colors duration-200 dark:bg-gray-700/50 dark:hover:bg-gray-600 dark:text-gray-300'
+                        >
+                          {item}
+                        </button>
+                        {/* 删除按钮 */}
+                        <button
+                          aria-label='删除搜索历史'
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            deleteSearchHistory(item); // 事件监听会自动更新界面
+                          }}
+                          className='absolute -top-1 -right-1 w-4 h-4 opacity-0 group-hover:opacity-100 bg-gray-400 hover:bg-red-500 text-white rounded-full flex items-center justify-center text-[10px] transition-colors'
+                        >
+                          <X className='w-3 h-3' />
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </section>
+                </section>
               )}
             </>
           )}
@@ -2603,4 +2679,3 @@ export function SearchPageClient({ searchBase = '/search' }: { searchBase?: stri
     </PageLayout>
   );
 }
-

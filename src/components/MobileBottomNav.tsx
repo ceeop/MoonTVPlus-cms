@@ -2,10 +2,24 @@
 
 'use client';
 
-import { Blend, Cat, Clover, Container, Film, Globe, Home, Star, Tv, TvMinimalPlay, Users } from 'lucide-react';
+import {
+  Blend,
+  Cat,
+  Clover,
+  Container,
+  Film,
+  Globe,
+  Home,
+  Star,
+  Tv,
+  TvMinimalPlay,
+  Users,
+} from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
+
+import { loadCatalogNavigation } from '@/lib/catalog/navigation.client';
 
 import { useWatchRoomContextSafe } from './WatchRoomProvider';
 
@@ -27,10 +41,6 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
     return queryString ? `${pathname}?${queryString}` : pathname;
   };
   const currentActive = activePath ?? getCurrentFullPath();
-
-  if (pathname === '/watch-room/screen') {
-    return null;
-  }
 
   const [navItems, setNavItems] = useState([
     { icon: Home, label: '首页', href: '/' },
@@ -54,14 +64,15 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       label: '综艺',
       href: '/douban?type=show',
     },
-      {
-        icon: TvMinimalPlay,
-        label: '电视直播',
-        href: '/live',
-      },
+    {
+      icon: TvMinimalPlay,
+      label: '电视直播',
+      href: '/live',
+    },
   ]);
 
   useEffect(() => {
+    if (pathname === '/watch-room/screen') return;
     const runtimeConfig = (window as any).RUNTIME_CONFIG;
 
     // 基础导航项（不包括观影室）
@@ -70,22 +81,30 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       {
         icon: Film,
         label: '电影',
-        href: '/douban?type=movie',
+        href: runtimeConfig?.CATALOG_ENABLED
+          ? '/catalog?kind=movie'
+          : '/douban?type=movie',
       },
       {
         icon: Tv,
         label: '剧集',
-        href: '/douban?type=tv',
+        href: runtimeConfig?.CATALOG_ENABLED
+          ? '/catalog?kind=tv'
+          : '/douban?type=tv',
       },
       {
         icon: Cat,
         label: '动漫',
-        href: '/douban?type=anime',
+        href: runtimeConfig?.CATALOG_ENABLED
+          ? '/catalog?kind=anime'
+          : '/douban?type=anime',
       },
       {
         icon: Clover,
         label: '综艺',
-        href: '/douban?type=show',
+        href: runtimeConfig?.CATALOG_ENABLED
+          ? '/catalog?kind=variety'
+          : '/douban?type=show',
       },
       ...(runtimeConfig?.LIVE_ENABLED
         ? [
@@ -144,8 +163,46 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
 
     // 特殊源入口不在导航展示，只能手动访问 /under
 
-    setNavItems(items);
-  }, [watchRoomContext?.isEnabled]);
+    const controller = new AbortController();
+    if (runtimeConfig?.CATALOG_ENABLED) {
+      const baseItems = items.filter(
+        (item) => !item.href.startsWith('/catalog?kind=')
+      );
+      baseItems.splice(1, 0, {
+        icon: Film,
+        label: '影视片库',
+        href: '/catalog',
+      });
+      setNavItems(baseItems);
+      void loadCatalogNavigation(controller.signal)
+        .then((categories) => {
+          if (controller.signal.aborted) return;
+          const categoryItems = categories.map((category) => ({
+            icon:
+              category.kind === 'tv'
+                ? Tv
+                : category.kind === 'anime'
+                ? Cat
+                : category.kind === 'variety'
+                ? Clover
+                : Film,
+            label: category.name,
+            href: category.href,
+          }));
+          setNavItems([
+            ...baseItems.slice(0, 2),
+            ...categoryItems,
+            ...baseItems.slice(2),
+          ]);
+        })
+        .catch(() => {
+          /* The main catalog entry remains available if loading fails. */
+        });
+    } else setNavItems(items);
+    return () => controller.abort();
+  }, [watchRoomContext?.isEnabled, pathname]);
+
+  if (pathname === '/watch-room/screen') return null;
 
   const isActive = (href: string) => {
     const typeMatch = href.match(/type=([^&]+)/)?.[1];
@@ -186,10 +243,11 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
                 className='flex flex-col items-center justify-center w-full h-14 gap-1 text-xs'
               >
                 <item.icon
-                  className={`h-6 w-6 ${active
-                    ? 'text-green-600 dark:text-green-400'
-                    : 'text-gray-500 dark:text-gray-400'
-                    }`}
+                  className={`h-6 w-6 ${
+                    active
+                      ? 'text-green-600 dark:text-green-400'
+                      : 'text-gray-500 dark:text-gray-400'
+                  }`}
                 />
                 <span
                   className={

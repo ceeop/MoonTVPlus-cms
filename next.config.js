@@ -24,6 +24,7 @@ const createNextConfig = (phase) => {
   const isDevelopment = phase === PHASE_DEVELOPMENT_SERVER || process.env.NODE_ENV === 'development';
 
   const nextConfig = {
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   // Cloudflare Pages 不支持 standalone，使用默认输出
   output: isEdgeBuild ? undefined : 'standalone',
   eslint: {
@@ -41,6 +42,7 @@ const createNextConfig = (phase) => {
   // 声明为 server external 后，OpenNext 会完整拷贝这些包并应用 workerd 导出。
   // 参见: https://opennext.js.org/cloudflare/howtos/workerd
   serverExternalPackages: [
+    'pg',
     '@libsql/client',
     '@libsql/hrana-client',
     '@libsql/isomorphic-ws',
@@ -54,6 +56,7 @@ const createNextConfig = (phase) => {
     webpackBuildWorker: !isEdgeBuild,
     // Next 14.2 仍可能读取此字段；与 serverExternalPackages 保持一致
     serverComponentsExternalPackages: [
+      'pg',
       '@libsql/client',
       '@libsql/hrana-client',
       '@libsql/isomorphic-ws',
@@ -167,7 +170,6 @@ const createNextConfig = (phase) => {
             'nodemailer',
             'socket.io',
             'redis',
-            '@vercel/postgres',
             'pg',
             'libsql',
             '@libsql/isomorphic-fetch',
@@ -219,7 +221,6 @@ const createNextConfig = (phase) => {
       config.externals = config.externals || [];
       config.externals.push({
         'better-sqlite3': 'commonjs better-sqlite3',
-        '@vercel/postgres': 'commonjs @vercel/postgres',
         'pg': 'commonjs pg',
         '@libsql/client': 'commonjs @libsql/client',
       });

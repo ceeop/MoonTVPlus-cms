@@ -25,6 +25,7 @@ import { base58Encode, processImageUrl } from '@/lib/utils';
 
 import AIChatPanel from '@/components/AIChatPanel';
 import BannerCarousel from '@/components/BannerCarousel';
+import CatalogWall from '@/components/CatalogWall';
 import ContinueWatching from '@/components/ContinueWatching';
 import FireworksCanvas from '@/components/FireworksCanvas';
 import HttpWarningDialog from '@/components/HttpWarningDialog';
@@ -43,6 +44,12 @@ interface HomeModule {
 }
 
 function HomeClient() {
+  const [catalogEnabled, setCatalogEnabled] = useState(false);
+  const [catalogReady, setCatalogReady] = useState(false);
+  useEffect(() => {
+    setCatalogEnabled((window as any).RUNTIME_CONFIG?.CATALOG_ENABLED === true);
+    setCatalogReady(true);
+  }, []);
   // 移除了 activeTab 状态，收藏夹功能已移到 UserMenu
   const [hotMovies, setHotMovies] = useState<DoubanItem[]>([]);
   const [hotTvShows, setHotTvShows] = useState<DoubanItem[]>([]);
@@ -385,6 +392,7 @@ function HomeClient() {
 
   useEffect(() => {
     const CACHE_DURATION = 60 * 60 * 1000; // 1小时
+    if ((window as any).RUNTIME_CONFIG?.CATALOG_ENABLED === true) return;
 
     const getCache = (key: string) => {
       try {
@@ -880,11 +888,81 @@ function HomeClient() {
     }
   };
 
+  const shortcutClassName =
+    'inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900';
+  const headerActions = (
+    <>
+      <button
+        type='button'
+        onClick={handleDirectPlay}
+        className={`${shortcutClassName} text-blue-500 hover:bg-blue-500/10 hover:text-blue-600 dark:text-blue-400`}
+        title='直链播放'
+        aria-label='直链播放'
+      >
+        <LinkIcon size={20} aria-hidden='true' />
+      </button>
+      {musicEnabled && (
+        <Link
+          href='/music'
+          prefetch={false}
+          className={`${shortcutClassName} text-green-500 hover:bg-green-500/10 hover:text-green-600 dark:text-green-400`}
+          title='音乐视听'
+          aria-label='音乐视听'
+        >
+          <Music size={20} aria-hidden='true' />
+        </Link>
+      )}
+      {mangaEnabled && (
+        <Link
+          href='/manga'
+          prefetch={false}
+          className={`${shortcutClassName} text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400`}
+          title='漫画展馆'
+          aria-label='漫画展馆'
+        >
+          <BookOpen size={20} aria-hidden='true' />
+        </Link>
+      )}
+      {booksEnabled && (
+        <Link
+          href='/books'
+          prefetch={false}
+          className={`${shortcutClassName} text-amber-500 hover:bg-amber-500/10 hover:text-amber-600 dark:text-amber-400`}
+          title='电子书馆'
+          aria-label='电子书馆'
+        >
+          <BookMarked size={20} aria-hidden='true' />
+        </Link>
+      )}
+      {sourceSearchEnabled && (
+        <Link
+          href='/source-search'
+          className={`${shortcutClassName} text-blue-500 hover:bg-blue-500/10 hover:text-blue-600 dark:text-blue-400`}
+          title='源站寻片'
+          aria-label='源站寻片'
+        >
+          <ListVideo size={20} aria-hidden='true' />
+        </Link>
+      )}
+      {aiEnabled && (
+        <button
+          type='button'
+          onClick={() => setShowAIChat(true)}
+          className={`${shortcutClassName} text-purple-500 hover:bg-purple-500/10 hover:text-purple-600 dark:text-purple-400`}
+          title='AI问片'
+          aria-label='AI问片'
+        >
+          <Bot size={20} aria-hidden='true' />
+        </button>
+      )}
+    </>
+  );
+
   return (
-    <PageLayout>
+    <PageLayout headerActions={headerActions}>
       <FireworksCanvas />
       {/* TMDB 热门轮播图 */}
-      {homeBannerEnabled && (
+      {catalogReady && homeBannerEnabled && !catalogEnabled && (
         <div className='w-full mb-4'>
           <BannerCarousel delayLoad={true} />
         </div>
@@ -894,82 +972,12 @@ function HomeClient() {
         <div className='max-w-[95%] mx-auto'>
           {/* 首页内容 */}
           <>
-            {/* 源站寻片和AI问片入口 */}
-            <div
-              className={`flex items-center justify-end gap-2 mb-4 ${
-                homeBannerEnabled ? '' : 'mt-[30px]'
-              }`}
-            >
-              <button
-                onClick={handleDirectPlay}
-                className='p-1.5 rounded-lg text-blue-500 hover:text-blue-600 transition-colors'
-                title='直链播放'
-              >
-                <LinkIcon size={18} />
-              </button>
-
-              {musicEnabled && (
-                <Link href='/music' prefetch={false}>
-                  <button
-                    className='p-1.5 rounded-lg text-green-500 hover:text-green-600 transition-colors'
-                    title='音乐视听'
-                  >
-                    <Music size={18} />
-                  </button>
-                </Link>
-              )}
-
-              {mangaEnabled && (
-                <Link href='/manga' prefetch={false}>
-                  <button
-                    className='p-1.5 rounded-lg text-emerald-500 hover:text-emerald-600 transition-colors'
-                    title='漫画展馆'
-                  >
-                    <BookOpen size={18} />
-                  </button>
-                </Link>
-              )}
-
-              {booksEnabled && (
-                <Link href='/books' prefetch={false}>
-                  <button
-                    className='p-1.5 rounded-lg text-amber-500 hover:text-amber-600 transition-colors'
-                    title='电子书馆'
-                  >
-                    <BookMarked size={18} />
-                  </button>
-                </Link>
-              )}
-
-              {/* 源站寻片入口 */}
-              {sourceSearchEnabled && (
-                <Link href='/source-search'>
-                  <button
-                    className='p-2 rounded-lg text-blue-500 hover:text-blue-600 transition-colors'
-                    title='源站寻片'
-                  >
-                    <ListVideo size={20} />
-                  </button>
-                </Link>
-              )}
-
-              {/* AI问片入口 */}
-              {aiEnabled && (
-                <button
-                  onClick={() => setShowAIChat(true)}
-                  className='p-2 rounded-lg text-purple-500 hover:text-purple-600 transition-colors'
-                  title='AI问片'
-                >
-                  <Bot size={20} />
-                </button>
-              )}
-            </div>
-
             {/* 继续观看 */}
             {homeContinueWatchingEnabled && <ContinueWatching />}
+            {catalogEnabled && <CatalogWall compact />}
 
             {/* 根据配置动态渲染首页模块 */}
-            {homeModules
+            {catalogReady && !catalogEnabled && homeModules
               .filter((module) => module.enabled)
               .sort((a, b) => a.order - b.order)
               .map((module) => renderModule(module.id))}

@@ -7,6 +7,7 @@ import {
   createAdFilteringHlsLoader,
   loadCustomAdFilterCode,
 } from '@/lib/hls-ad-filter.client';
+import { prepareHlsPlaybackUrl } from '@/lib/hls-playback-url';
 
 declare global {
   interface HTMLVideoElement {
@@ -38,6 +39,7 @@ export default function TVNativeVideo({
   onPlayingChange,
   onBufferingChange,
   adFilterEnabled = false,
+  source = '',
   playbackRate = 1,
   startTime = 0,
   command,
@@ -53,6 +55,7 @@ export default function TVNativeVideo({
   onPlayingChange?: (playing: boolean) => void;
   onBufferingChange?: (buffering: boolean) => void;
   adFilterEnabled?: boolean;
+  source?: string;
   playbackRate?: number;
   startTime?: number;
   command?: number;
@@ -160,6 +163,10 @@ export default function TVNativeVideo({
     async function attach() {
       cleanup();
       const type = getSourceType(url, sourceType);
+      const nativeHlsUrl = () => prepareHlsPlaybackUrl(url, {
+        origin: window.location.origin, source, adBlock: adFilterEnabled,
+        token: process.env.NEXT_PUBLIC_PROXY_M3U8_TOKEN || '', serverFilter: true,
+      });
 
       try {
         if (type === 'm3u8' && !videoEl.canPlayType('application/vnd.apple.mpegurl')) {
@@ -167,10 +174,12 @@ export default function TVNativeVideo({
           if (disposed) return;
           const Hls = HlsModule.default;
           if (Hls.isSupported()) {
+            if (adFilterEnabled) customAdFilterCodeRef.current = await loadCustomAdFilterCode();
+            if (disposed) return;
             const CustomLoader = adFilterEnabled
               ? createAdFilteringHlsLoader(
                   Hls,
-                  () => '',
+                  () => source,
                   () => customAdFilterCodeRef.current
                 )
               : undefined;
@@ -181,11 +190,14 @@ export default function TVNativeVideo({
               maxBufferLength: live ? 18 : 45,
               ...(CustomLoader ? { loader: CustomLoader } : {}),
             });
-            hls.loadSource(url);
+            hls.loadSource(prepareHlsPlaybackUrl(url, {
+              origin: window.location.origin, source, adBlock: adFilterEnabled,
+              token: process.env.NEXT_PUBLIC_PROXY_M3U8_TOKEN || '',
+            }));
             hls.attachMedia(videoEl);
             videoEl.hls = hls;
           } else {
-            videoEl.src = url;
+            videoEl.src = nativeHlsUrl();
           }
         } else if (type === 'flv') {
           const flvModule = await import('flv.js');
@@ -200,7 +212,7 @@ export default function TVNativeVideo({
             videoEl.src = url;
           }
         } else {
-          videoEl.src = url;
+          videoEl.src = type === 'm3u8' ? nativeHlsUrl() : url;
         }
 
         videoEl.setAttribute('playsinline', 'true');
@@ -297,7 +309,7 @@ export default function TVNativeVideo({
       clearBuffering();
       cleanup();
     };
-  }, [url, live, startTime, adFilterEnabled, playbackRate, sourceType]);
+  }, [url, live, startTime, adFilterEnabled, playbackRate, sourceType, source]);
 
   useEffect(() => {
     const video = videoRef.current;

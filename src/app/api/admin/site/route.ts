@@ -40,6 +40,7 @@ export async function POST(request: NextRequest) {
       DoubanImageProxyType,
       DoubanImageProxy,
       DisableYellowFilter,
+      M3u8Only,
       FluidSearch,
       DanmakuSourceType,
       DanmakuApiBase,
@@ -103,6 +104,7 @@ export async function POST(request: NextRequest) {
       DoubanImageProxyType: string;
       DoubanImageProxy: string;
       DisableYellowFilter: boolean;
+      M3u8Only?: boolean;
       FluidSearch: boolean;
       DanmakuSourceType?: 'builtin' | 'custom';
       DanmakuApiBase: string;
@@ -219,6 +221,7 @@ export async function POST(request: NextRequest) {
         typeof MagnetAcgripReverseProxy !== 'string') ||
       (MagnetNyaaReverseProxy !== undefined &&
         typeof MagnetNyaaReverseProxy !== 'string') ||
+      (M3u8Only !== undefined && typeof M3u8Only !== 'boolean') ||
       typeof EnableComments !== 'boolean' ||
       (CustomAdFilterCode !== undefined &&
         typeof CustomAdFilterCode !== 'string') ||
@@ -267,7 +270,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '参数格式错误' }, { status: 400 });
     }
 
-    const adminConfig = await getConfig();
+    const adminConfig = await getConfig(true);
 
     // 权限校验 - 使用v2用户系统
     if (username !== process.env.USERNAME) {
@@ -290,6 +293,7 @@ export async function POST(request: NextRequest) {
       DoubanImageProxyType,
       DoubanImageProxy: normalizeApiBaseUrl(DoubanImageProxy),
       DisableYellowFilter,
+      M3u8Only: M3u8Only ?? adminConfig.SiteConfig.M3u8Only ?? false,
       FluidSearch,
       DanmakuSourceType,
       DanmakuApiBase: normalizeApiBaseUrl(DanmakuApiBase),

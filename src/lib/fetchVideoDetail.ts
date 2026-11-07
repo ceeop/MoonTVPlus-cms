@@ -8,6 +8,7 @@ interface FetchVideoDetailOptions {
   source: string;
   id: string;
   fallbackTitle?: string;
+  fresh?: boolean;
 }
 
 /**
@@ -19,6 +20,7 @@ export async function fetchVideoDetail({
   source,
   id,
   fallbackTitle: _fallbackTitle = '',
+  fresh = false,
 }: FetchVideoDetailOptions): Promise<SearchResult> {
   // 检查是否是特殊源（emby、openlist、xiaoya）
   if (isSpecialSource(source)) {
@@ -41,7 +43,7 @@ export async function fetchVideoDetail({
     throw new Error('无效的API来源');
   }
 
-  const detail = await getDetailFromApiV2(apiSite, id);
+  const detail = await getDetailFromApiV2(apiSite, id, fresh);
   if (!detail) {
     throw new Error('获取视频详情失败');
   }

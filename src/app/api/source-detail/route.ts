@@ -3,8 +3,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { clientAdProxyEpisodes } from '@/lib/client-ad-proxy';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
 import { getDetailFromApiV2 } from '@/lib/downstream';
+import { filterM3u8SourceResult } from '@/lib/m3u8-source-filter';
+import { catalogSourceEnabled } from '@/lib/catalog/model';
 import { getProxyToken } from '@/lib/emby-token';
 import { hasFeaturePermission } from '@/lib/permissions';
 import {
@@ -117,28 +120,12 @@ function applyClientAdProxyToEpisodes(
   episodes: string[] | undefined,
   clientAdSourceApis: string[] | undefined
 ): string[] | undefined {
-  if (!episodes || episodes.length === 0) return episodes;
-  if (!clientAdSourceApis || !clientAdSourceApis.includes(sourceCode)) {
-    return episodes;
-  }
-
-  const ua = (request.headers.get('user-agent') || '').toLowerCase();
-  if (!ua.includes('moontvplus app') && !ua.includes('oriontv')) {
-    return episodes;
-  }
-
-  const origin = getRequestSiteOrigin(request);
-  return episodes.map((episode) => {
-    if (!episode || typeof episode !== 'string') return episode;
-    if (
-      episode.includes('/api/proxy-m3u8') ||
-      episode.includes('/api/proxy/vod/m3u8')
-    ) {
-      return episode;
-    }
-    // 仅处理 http(s) 直链 m3u8，站内相对播放地址不改写
-    if (!/^https?:\/\//i.test(episode)) return episode;
-    return `${origin}/api/proxy-m3u8?url=${encodeURIComponent(episode)}`;
+  return clientAdProxyEpisodes(episodes, {
+    origin: getRequestSiteOrigin(request),
+    source: sourceCode,
+    userAgent: request.headers.get('user-agent') || '',
+    enabledSources: clientAdSourceApis,
+    token: process.env.NEXT_PUBLIC_PROXY_M3U8_TOKEN || '',
   });
 }
 
@@ -167,7 +154,7 @@ function formatNetdiskEpisodeTitle(
  * 根据 source 和 id 直接获取视频详情
  * 这个API专门用于play页面快速获取当前源的详情
  */
-export async function GET(request: NextRequest) {
+async function getSourceDetail(request: NextRequest) {
   const authInfo = getAuthInfoFromCookie(request);
   if (!authInfo || !authInfo.username) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -1290,7 +1277,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '无效的API来源' }, { status: 400 });
     }
 
-    const result = await getDetailFromApiV2(apiSite, id);
+    const result = await getDetailFromApiV2(apiSite, id, searchParams.get('fresh') === '1');
 
     // 添加 proxyMode 到返回结果
     const resultWithProxy = {
@@ -1314,7 +1301,7 @@ export async function GET(request: NextRequest) {
     const cacheTime = await getCacheTime();
 
     // 同一源在不同 UA 下 episodes 可能不同，避免 CDN/共享缓存串号
-    if (clientAdEnabled) {
+    if (clientAdEnabled || catalogSourceEnabled(adminConfig, sourceCode)) {
       return NextResponse.json(resultWithProxy, {
         headers: {
           'Cache-Control': 'private, no-store',
@@ -1335,7 +1322,24 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     return NextResponse.json(
       { error: (error as Error).message },
-      { status: 500 }
+      { status: error instanceof Error && error.message === '当前全局设置仅允许 M3U8 线路' ? 404 : 500 }
     );
   }
+}
+
+export async function GET(request: NextRequest) {
+  const response = await getSourceDetail(request);
+  response.headers.set('Cache-Control', 'private, no-store');
+  response.headers.set('CDN-Cache-Control', 'no-store');
+  response.headers.set('Vercel-CDN-Cache-Control', 'no-store');
+  if (!response.ok || !(await getConfig(true)).SiteConfig.M3u8Only) return response;
+  const payload = await response.clone().json();
+  if (!Array.isArray(payload.episodes)) return response;
+  const selected = filterM3u8SourceResult(payload, true);
+  if (!selected) return NextResponse.json({ error: '当前全局设置仅允许 M3U8 线路' }, { status: 404, headers: { 'Cache-Control': 'private, no-store' } });
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  headers.delete('etag');
+  headers.set('Cache-Control', 'private, no-store');
+  return NextResponse.json(selected, { headers });
 }

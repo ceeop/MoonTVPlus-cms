@@ -16,9 +16,15 @@ interface PageLayoutProps {
   children: React.ReactNode;
   activePath?: string;
   hideNavigation?: boolean; // 控制是否隐藏顶部和底部导航栏
+  headerActions?: React.ReactNode;
 }
 
-const PageLayout = ({ children, activePath = '/', hideNavigation = false }: PageLayoutProps) => {
+const PageLayout = ({
+  children,
+  activePath = '/',
+  hideNavigation = false,
+  headerActions,
+}: PageLayoutProps) => {
   const router = useRouter();
   const [backgroundImage, setBackgroundImage] = useState('');
   const shouldShowSharedBackground = !hideNavigation && activePath !== '/play';
@@ -97,7 +103,7 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
             )}
 
             {/* 桌面端顶部按钮 */}
-            {!hideNavigation && (
+            {!hideNavigation && !headerActions && (
               <div className='absolute top-2 right-4 z-20 hidden md:flex items-center gap-2'>
                 <ThemeToggle />
                 <UserMenu />
@@ -112,6 +118,20 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
                 paddingBottom: 'calc(3.5rem + env(safe-area-inset-bottom))',
               }}
             >
+              {!hideNavigation && headerActions && (
+                <div
+                  className='relative z-20 flex flex-wrap items-center justify-end gap-2 px-4 py-2'
+                  role='group'
+                  aria-label='页面快捷操作'
+                >
+                  {headerActions}
+                  <div className='hidden shrink-0 items-center gap-2 md:flex'>
+                    <ThemeToggle />
+                    <UserMenu />
+                    <UpdateNotification />
+                  </div>
+                </div>
+              )}
               {children}
             </main>
           </div>

@@ -1,48 +1,50 @@
 /* eslint-disable no-console, @typescript-eslint/no-explicit-any */
 
 /**
- * Vercel Postgres Storage Implementation
+ * PostgreSQL Storage Implementation
  *
- * 兼容 D1Storage 的接口，使用 Vercel Postgres 作为后端
+ * 兼容 D1Storage 的接口，使用 PostgreSQL 作为后端
  *
  * 注意：此模块仅在服务端使用，通过 webpack 配置排除客户端打包
  */
 
-import {
-  IStorage,
-  PlayRecord,
-  Favorite,
-  SkipConfig,
-  DanmakuFilterConfig,
-  Notification,
-  MovieRequest,
-  PushSubscriptionRecord,
-  LocalSettingsSyncRecord,
-  SetLocalSettingsSyncOptions,
-  SetLocalSettingsSyncResult,
-} from './types';
+import { createHash } from 'crypto';
+
 import { AdminConfig } from './admin.types';
-import { MangaReadRecord, MangaShelfItem } from './manga.types';
 import { BookReadRecord, BookShelfItem } from './book.types';
 import { DatabaseAdapter } from './d1-adapter';
+import { MangaReadRecord, MangaShelfItem } from './manga.types';
 import {
   MusicV2HistoryRecord,
   MusicV2PlaylistItem,
   MusicV2PlaylistRecord,
 } from './music-v2';
 import { dispatchNotificationChannels } from './notification-dispatch';
+import {
+  DanmakuFilterConfig,
+  Favorite,
+  IStorage,
+  LocalSettingsSyncRecord,
+  MovieRequest,
+  Notification,
+  PlayRecord,
+  PushSubscriptionRecord,
+  SetLocalSettingsSyncOptions,
+  SetLocalSettingsSyncResult,
+  SkipConfig,
+} from './types';
 
 /**
- * Vercel Postgres 存储实现
+ * PostgreSQL 存储实现
  *
  * 特点：
  * - 兼容 D1Storage 的所有接口
- * - 使用 Vercel Postgres (Neon) 作为数据库
- * - 支持 Vercel serverless 部署
+ * - 使用 pg 连接标准 PostgreSQL 数据库
+ * - 支持连接池和事务批量写入
  *
  * 使用方式：
  * 1. 设置环境变量：NEXT_PUBLIC_STORAGE_TYPE=postgres
- * 2. 配置 POSTGRES_URL 环境变量
+ * 2. 配置 DATABASE_URL（或 POSTGRES_URL）环境变量
  * 3. 运行数据库迁移脚本
  */
 export class PostgresStorage implements IStorage {
@@ -396,11 +398,7 @@ export class PostgresStorage implements IStorage {
   // ==================== 用户管理 ====================
 
   private async hashPassword(password: string): Promise<string> {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(password);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+    return createHash('sha256').update(password).digest('hex');
   }
 
   async verifyUser(userName: string, password: string): Promise<boolean> {

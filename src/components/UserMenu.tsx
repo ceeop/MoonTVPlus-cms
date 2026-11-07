@@ -47,6 +47,7 @@ import {
   type LocalSettingsPayload,
 } from '@/lib/local-settings-sync';
 import { clearBangumiImageFallbackCache } from '@/lib/utils';
+import { buildTVBoxSubscribeUrl } from '@/lib/tvbox-subscribe-url';
 import { CURRENT_VERSION } from '@/lib/version';
 import { UpdateStatus } from '@/lib/version_check';
 
@@ -58,6 +59,7 @@ import { NotificationPanel } from './NotificationPanel';
 import { OfflineDownloadPanel } from './OfflineDownloadPanel';
 import { PersonalCenterPanel } from './PersonalCenterPanel';
 import Toast, { ToastProps } from './Toast';
+import TVBoxManagementSection from './TVBoxManagementSection';
 import TVRemotePanel from './tv/TVRemotePanel';
 import { useVersionCheck } from './VersionCheckProvider';
 import { VersionPanel } from './VersionPanel';
@@ -107,6 +109,7 @@ export const UserMenu: React.FC = () => {
     useState(false);
   const [subscribeYellowFilterEnabled, setSubscribeYellowFilterEnabled] =
     useState(false);
+  const [subscribeCloudFilterEnabled, setSubscribeCloudFilterEnabled] = useState(true);
 
   // Web 电视扫码登录入口（手机摄像头扫描电视端二维码）
   const [isTvQrScannerOpen, setIsTvQrScannerOpen] = useState(false);
@@ -596,18 +599,10 @@ export const UserMenu: React.FC = () => {
   const buildSubscribeUrl = (
     token: string,
     adFilter: boolean,
-    yellowFilter: boolean
+    yellowFilter: boolean,
+    cloudFilter = subscribeCloudFilterEnabled
   ) => {
-    const currentOrigin = window.location.origin;
-    const url = new URL('/api/tvbox/subscribe', currentOrigin);
-    url.searchParams.set('token', token);
-    if (adFilter) {
-      url.searchParams.set('adFilter', 'true');
-    }
-    if (yellowFilter) {
-      url.searchParams.set('yellowFilter', 'true');
-    }
-    return url.toString();
+    return buildTVBoxSubscribeUrl(window.location.origin, token, { adFilter, yellowFilter, cloudFilter });
   };
 
   // 获取认证信息和存储类型
@@ -1652,13 +1647,15 @@ export const UserMenu: React.FC = () => {
       buildSubscribeUrl(
         tvboxToken,
         subscribeAdFilterEnabled,
-        subscribeYellowFilterEnabled
+        subscribeYellowFilterEnabled,
+        subscribeCloudFilterEnabled
       )
     );
   }, [
     tvboxToken,
     subscribeAdFilterEnabled,
     subscribeYellowFilterEnabled,
+    subscribeCloudFilterEnabled,
     isSubscribeOpen,
   ]);
 
@@ -5460,7 +5457,7 @@ export const UserMenu: React.FC = () => {
       {/* 电视访问面板 */}
       <div className='fixed top-1/2 left-1/2 z-[1001] max-h-[92vh] w-full max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-3xl border border-slate-200/70 bg-white shadow-2xl shadow-black/30 dark:border-white/10 dark:bg-slate-950'>
         <div
-          className='max-h-[92vh] overflow-y-auto p-6 sm:p-7'
+          className='max-h-[92vh] scroll-pt-32 overflow-y-auto p-6 sm:p-7'
           data-panel-content
           onTouchMove={(e) => {
             e.stopPropagation();
@@ -5514,7 +5511,7 @@ export const UserMenu: React.FC = () => {
           ) : (
             <>
           {/* 标题栏 */}
-          <div className='mb-6 flex items-start justify-between gap-4'>
+          <div className='sticky -top-6 z-10 mb-6 flex items-start justify-between gap-4 bg-white py-3 dark:bg-slate-950 sm:-top-7'>
             <div>
               <div className='inline-flex items-center gap-2 rounded-full bg-green-500/10 px-3 py-1 text-xs font-bold text-green-600 dark:text-green-400'>
                 <Monitor className='h-4 w-4' />
@@ -5564,6 +5561,7 @@ export const UserMenu: React.FC = () => {
           </div>
 
           {tvAccessTab === 'tvbox' && (
+            <>
             <section className='rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-white/10 dark:bg-white/[0.04]'>
               <div className='flex items-center justify-between gap-3'>
                 <div className='flex items-center gap-3'>
@@ -5580,7 +5578,7 @@ export const UserMenu: React.FC = () => {
                   </div>
                 </div>
                 <span
-                  className={`rounded-full px-2.5 py-1 text-xs font-bold ${
+                  className={`shrink-0 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-bold ${
                     subscribeEnabled
                       ? 'bg-green-500/10 text-green-600 dark:text-green-400'
                       : 'bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400'
@@ -5605,12 +5603,14 @@ export const UserMenu: React.FC = () => {
                   <div className='grid gap-3 sm:grid-cols-2'>
                     <button
                       type='button'
+                      role='switch'
+                      aria-checked={subscribeAdFilterEnabled}
                       onClick={() => setSubscribeAdFilterEnabled((prev) => !prev)}
                       className='flex w-full cursor-pointer items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-green-400 dark:border-white/10 dark:bg-slate-900/70'
                     >
                       <div>
                         <div className='text-sm font-bold text-slate-800 dark:text-slate-200'>去广告</div>
-                        <div className='mt-1 text-xs text-slate-500 dark:text-slate-400'>开启后通过代理处理播放链接</div>
+                        <div className='mt-1 text-xs text-slate-500 dark:text-slate-400'>代理处理片库和标准 CMS 的 M3U8 播放链接</div>
                       </div>
                       <span className={`h-5 w-9 rounded-full p-0.5 transition ${subscribeAdFilterEnabled ? 'bg-green-500' : 'bg-slate-300 dark:bg-slate-700'}`}>
                         <span className={`block h-4 w-4 rounded-full bg-white transition ${subscribeAdFilterEnabled ? 'translate-x-4' : ''}`} />
@@ -5618,18 +5618,32 @@ export const UserMenu: React.FC = () => {
                     </button>
                     <button
                       type='button'
+                      role='switch'
+                      aria-checked={subscribeYellowFilterEnabled}
                       onClick={() => setSubscribeYellowFilterEnabled((prev) => !prev)}
                       className='flex w-full cursor-pointer items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-yellow-400 dark:border-white/10 dark:bg-slate-900/70'
                     >
                       <div>
                         <div className='text-sm font-bold text-slate-800 dark:text-slate-200'>黄色过滤</div>
-                        <div className='mt-1 text-xs text-slate-500 dark:text-slate-400'>过滤代理搜索中的黄色内容</div>
+                        <div className='mt-1 text-xs text-slate-500 dark:text-slate-400'>过滤片库和标准 CMS 返回的内容</div>
                       </div>
                       <span className={`h-5 w-9 rounded-full p-0.5 transition ${subscribeYellowFilterEnabled ? 'bg-yellow-500' : 'bg-slate-300 dark:bg-slate-700'}`}>
                         <span className={`block h-4 w-4 rounded-full bg-white transition ${subscribeYellowFilterEnabled ? 'translate-x-4' : ''}`} />
                       </span>
                     </button>
                   </div>
+
+                  <button
+                    type='button'
+                    role='switch'
+                    aria-checked={subscribeCloudFilterEnabled}
+                    onClick={() => setSubscribeCloudFilterEnabled((prev) => !prev)}
+                    className='flex w-full cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-green-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 dark:border-white/10 dark:bg-slate-900/70'
+                  >
+                    <div><div className='text-sm font-bold text-slate-800 dark:text-slate-200'>过滤网盘接口</div><div className='mt-1 text-xs text-slate-500 dark:text-slate-400'>隐藏识别到的网盘配置、盘搜和网盘播放站点</div></div>
+                    <span className={`h-5 w-9 shrink-0 rounded-full p-0.5 transition ${subscribeCloudFilterEnabled ? 'bg-green-500' : 'bg-slate-300 dark:bg-slate-700'}`}><span className={`block h-4 w-4 rounded-full bg-white transition ${subscribeCloudFilterEnabled ? 'translate-x-4' : ''}`} /></span>
+                  </button>
+                  <p className='text-xs leading-5 text-slate-500 dark:text-slate-400'>M3U8 线路筛选由后台站点设置统一控制；去广告和黄色过滤用于本地片库及标准 JSON CMS；JAR、JS 等客户端源自行处理内容与播放。</p>
 
                   <div>
                     <h4 className='mb-2 text-sm font-medium text-slate-700 dark:text-slate-300'>
@@ -5640,6 +5654,7 @@ export const UserMenu: React.FC = () => {
                         type='text'
                         className='min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500 dark:border-white/10 dark:bg-slate-900 dark:text-slate-200'
                         value={subscribeUrl}
+                        aria-label='TVBox 订阅链接'
                         readOnly
                       />
                       <button
@@ -5673,6 +5688,8 @@ export const UserMenu: React.FC = () => {
                 </div>
               )}
             </section>
+            <TVBoxManagementSection role={currentRole} />
+            </>
           )}
 
           {tvAccessTab === 'orion' && (

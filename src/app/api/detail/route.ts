@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
 import { getDetailFromApi } from '@/lib/downstream';
+import { catalogSourceEnabled } from '@/lib/catalog/model';
 import {
   executeSavedSourceScript,
   normalizeScriptDetailResult,
@@ -261,13 +262,17 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '无效的API来源' }, { status: 400 });
     }
 
-    const result = await getDetailFromApi(apiSite, id);
+    const result = await getDetailFromApi(apiSite, id, searchParams.get('fresh') === '1');
 
     // 添加 proxyMode 到返回结果
     const resultWithProxy = {
       ...result,
       proxyMode: apiSite.proxyMode || false,
     };
+
+    if (catalogSourceEnabled(await getConfig(), sourceCode)) {
+      return NextResponse.json(resultWithProxy, { headers: { 'Cache-Control': 'private, no-store' } });
+    }
 
     const cacheTime = await getCacheTime();
 

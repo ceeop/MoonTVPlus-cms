@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
-import { API_CONFIG, getAvailableApiSites } from '@/lib/config';
+import {
+  catalogScope,
+  catalogSettings,
+  catalogSourceEnabled,
+} from '@/lib/catalog/model';
+import { getCatalogStore } from '@/lib/catalog/store';
+import { API_CONFIG, getAvailableApiSites, getConfig } from '@/lib/config';
 import { parseJsonLosslessIntegers } from '@/lib/json';
 import { SearchResult } from '@/lib/types';
 
@@ -39,10 +45,7 @@ export async function GET(request: NextRequest) {
   const page = searchParams.get('page') || '1';
 
   if (!sourceKey) {
-    return NextResponse.json(
-      { error: '缺少参数: source' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: '缺少参数: source' }, { status: 400 });
   }
 
   if (!categoryId) {
@@ -62,6 +65,22 @@ export async function GET(request: NextRequest) {
         { error: `未找到指定的视频源: ${sourceKey}` },
         { status: 404 }
       );
+    }
+
+    if (
+      searchParams.get('online') !== '1' &&
+      catalogSourceEnabled(await getConfig(), targetSite.key)
+    ) {
+      const config = await getConfig();
+      const data = await getCatalogStore().browse([targetSite], {
+        typeId: categoryId,
+        page: Number(page) || 1,
+        ...catalogScope(catalogSettings(config)),
+        excludeRestricted: !config.SiteConfig.DisableYellowFilter,
+      });
+      return NextResponse.json(data, {
+        headers: { 'Cache-Control': 'private, no-store' },
+      });
     }
 
     // 请求分类视频列表
@@ -127,9 +146,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Failed to get videos:', error);
-    return NextResponse.json(
-      { error: '获取视频列表失败' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: '获取视频列表失败' }, { status: 500 });
   }
 }

@@ -3,6 +3,8 @@ const { createServer } = require('http');
 const { parse } = require('url');
 const next = require('next');
 const { Server } = require('socket.io');
+// Only the local scheduler receives this process-scoped credential.
+process.env.CATALOG_INTERNAL_TOKEN = require('crypto').randomBytes(32).toString('hex');
 const {
   attachTVRemoteIO,
   cleanupTVRemoteDevices,
@@ -827,6 +829,11 @@ class TVRemoteServer {
 }
 
 app.prepare().then(async () => {
+  if (process.env.NEXT_PUBLIC_STORAGE_TYPE === 'postgres') {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { initPostgresDatabase } = require('./scripts/init-postgres.js');
+    await initPostgresDatabase();
+  }
   const httpServer = createServer(async (req, res) => {
     try {
       const parsedUrl = parse(req.url, true);
@@ -886,6 +893,24 @@ app.prepare().then(async () => {
     })
     .listen(port, () => {
       console.log(`> Ready on http://${hostname}:${port}`);
+      let catalogRunning = false;
+      const tickCatalog = async () => {
+        if (catalogRunning) return;
+        catalogRunning = true;
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/api/cron/internal/catalog`, {
+            headers: { Authorization: `Bearer ${process.env.CATALOG_INTERNAL_TOKEN}` },
+            signal: AbortSignal.timeout(60000),
+          });
+          if (!response.ok) console.warn('[Catalog] Collection tick failed:', response.status);
+        } catch (error) {
+          console.warn('[Catalog] Collection tick failed:', error.message);
+        } finally {
+          catalogRunning = false;
+        }
+      };
+      setTimeout(tickCatalog, 15000).unref();
+      setInterval(tickCatalog, 15000).unref();
       if (io) {
         console.log(`> Socket.IO ready on ws://${hostname}:${port}`);
       } else {

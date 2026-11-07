@@ -1,7 +1,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-
+import {
+  catalogItemEnabled,
+  catalogScope,
+  catalogSettings,
+  catalogSourceEnabled,
+  cmsUrl,
+  normalizeCmsItem,
+} from '@/lib/catalog/model';
+import { getCatalogStore } from '@/lib/catalog/store';
 import { API_CONFIG, ApiSite, getConfig } from '@/lib/config';
 import { parseJsonLosslessIntegers } from '@/lib/json';
+import {
+  filterM3u8SourceResult,
+  filterM3u8SourceResults,
+} from '@/lib/m3u8-source-filter';
 import { getCachedSearchPage, setCachedSearchPage } from '@/lib/search-cache';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
@@ -20,6 +32,19 @@ interface ApiSearchItem {
   vod_total?: number;
 }
 
+async function persistCatalogItem(site: ApiSite, raw: Record<string, unknown>) {
+  const item = normalizeCmsItem(raw, site);
+  if (item && catalogItemEnabled(await getConfig(), item)) {
+    try {
+      item.result = await getCatalogStore().put(item);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('在线资源写入片库失败:', (error as Error).message);
+    }
+  }
+  return item;
+}
+
 /**
  * 通用的带缓存搜索函数
  */
@@ -28,13 +53,20 @@ async function searchWithCache(
   query: string,
   page: number,
   url: string,
-  timeoutMs = 8000
+  timeoutMs = 8000,
+  bypassCache = false
 ): Promise<{ results: SearchResult[]; pageCount?: number }> {
   // 先查缓存
-  const cached = getCachedSearchPage(apiSite.key, query, page);
+  const cached = bypassCache
+    ? null
+    : getCachedSearchPage(apiSite.key, query, page);
+  const m3u8Only = (await getConfig()).SiteConfig.M3u8Only === true;
   if (cached) {
     if (cached.status === 'ok') {
-      return { results: cached.data, pageCount: cached.pageCount };
+      return {
+        results: filterM3u8SourceResults(cached.data, m3u8Only),
+        pageCount: cached.pageCount,
+      };
     } else {
       return { results: [] };
     }
@@ -72,6 +104,15 @@ async function searchWithCache(
 
     // 处理结果数据
     const allResults = data.list.map((item: ApiSearchItem) => {
+      const normalized = normalizeCmsItem(
+        item as unknown as Record<string, unknown>,
+        apiSite
+      );
+      if (normalized)
+        return {
+          ...normalized.result,
+          catalog_play_lines: normalized.playLines,
+        };
       let episodes: string[] = [];
       let titles: string[] = [];
 
@@ -123,16 +164,24 @@ async function searchWithCache(
     });
 
     // 过滤掉集数为 0 的结果
-    const results = allResults.filter((result: SearchResult) => result.episodes.length > 0);
+    const results = allResults.filter(
+      (result: SearchResult) => result.episodes.length > 0
+    );
 
+    if (catalogSourceEnabled(await getConfig(), apiSite.key)) {
+      for (const raw of data.list) await persistCatalogItem(apiSite, raw);
+    }
     const pageCount = page === 1 ? data.pagecount || 1 : undefined;
     // 写入缓存（成功）
     setCachedSearchPage(apiSite.key, query, page, 'ok', results, pageCount);
-    return { results, pageCount };
+    return { results: filterM3u8SourceResults(results, m3u8Only), pageCount };
   } catch (error: any) {
     clearTimeout(timeoutId);
     // 识别被 AbortController 中止（超时）
-    const aborted = error?.name === 'AbortError' || error?.code === 20 || error?.message?.includes('aborted');
+    const aborted =
+      error?.name === 'AbortError' ||
+      error?.code === 20 ||
+      error?.message?.includes('aborted');
     if (aborted) {
       setCachedSearchPage(apiSite.key, query, page, 'timeout', []);
     }
@@ -142,19 +191,37 @@ async function searchWithCache(
 
 export async function searchFromApi(
   apiSite: ApiSite,
-  query: string
+  query: string,
+  online = false,
+  skipCatalog = online
 ): Promise<SearchResult[]> {
+  const config = await getConfig(true);
+  // 统一搜索已单独返回片库结果；访问源时仍可复用短期搜索缓存。
+  if (!skipCatalog && catalogSourceEnabled(await getConfig(), apiSite.key)) {
+    return getCatalogStore().search([apiSite], {
+      query,
+      ...catalogScope(
+        catalogSettings(config),
+        config.SiteConfig.M3u8Only === true
+      ),
+    });
+  }
   try {
     const apiBaseUrl = apiSite.api;
-    const apiUrl =
-      apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
+    const apiUrl = cmsUrl(apiBaseUrl, { ac: 'videolist', wd: query });
 
     // 使用新的缓存搜索函数处理第一页
-    const firstPageResult = await searchWithCache(apiSite, query, 1, apiUrl, 8000);
+    const firstPageResult = await searchWithCache(
+      apiSite,
+      query,
+      1,
+      apiUrl,
+      8000,
+      online
+    );
     const results = firstPageResult.results;
     const pageCountFromFirst = firstPageResult.pageCount;
 
-    const config = await getConfig();
     const MAX_SEARCH_PAGES: number = config.SiteConfig.SearchDownstreamMaxPage;
 
     // 获取总页数
@@ -167,15 +234,22 @@ export async function searchFromApi(
       const additionalPagePromises = [];
 
       for (let page = 2; page <= pagesToFetch + 1; page++) {
-        const pageUrl =
-          apiBaseUrl +
-          API_CONFIG.search.pagePath
-            .replace('{query}', encodeURIComponent(query))
-            .replace('{page}', page.toString());
+        const pageUrl = cmsUrl(apiBaseUrl, {
+          ac: 'videolist',
+          wd: query,
+          pg: page,
+        });
 
         const pagePromise = (async () => {
           // 使用新的缓存搜索函数处理分页
-          const pageResult = await searchWithCache(apiSite, query, page, pageUrl, 8000);
+          const pageResult = await searchWithCache(
+            apiSite,
+            query,
+            page,
+            pageUrl,
+            8000,
+            online
+          );
           return pageResult.results;
         })();
 
@@ -204,13 +278,24 @@ const M3U8_PATTERN = /(https?:\/\/[^"'\s]+?\.m3u8)/g;
 
 export async function getDetailFromApi(
   apiSite: ApiSite,
-  id: string
+  id: string,
+  fresh = false
 ): Promise<SearchResult> {
+  const config = await getConfig(true);
+  if (!fresh && catalogSourceEnabled(config, apiSite.key)) {
+    const cached = await getCatalogStore().detail(apiSite, id, {
+      ...catalogScope(
+        catalogSettings(config),
+        config.SiteConfig.M3u8Only === true
+      ),
+    });
+    if (cached) return cached;
+  }
   if (apiSite.detail) {
     return handleSpecialSourceDetail(id, apiSite);
   }
 
-  const detailUrl = `${apiSite.api}${API_CONFIG.detail.path}${id}`;
+  const detailUrl = cmsUrl(apiSite.api, { ac: 'videolist', ids: id });
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -238,6 +323,15 @@ export async function getDetailFromApi(
   }
 
   const videoDetail = data.list[0];
+  const indexed = await persistCatalogItem(apiSite, videoDetail);
+  if (indexed) {
+    const selected = filterM3u8SourceResult(
+      { ...indexed.result, catalog_play_lines: indexed.playLines },
+      config.SiteConfig.M3u8Only === true
+    );
+    if (!selected) throw new Error('当前全局设置仅允许 M3U8 线路');
+    return selected;
+  }
   let episodes: string[] = [];
   let titles: string[] = [];
 
@@ -296,9 +390,20 @@ export async function getDetailFromApi(
 
 export async function getDetailFromApiV2(
   apiSite: ApiSite,
-  id: string
+  id: string,
+  fresh = false
 ): Promise<SearchResult> {
-  const detailUrl = `${apiSite.api}${API_CONFIG.detail.path}${id}`;
+  const config = await getConfig(true);
+  if (!fresh && catalogSourceEnabled(config, apiSite.key)) {
+    const cached = await getCatalogStore().detail(apiSite, id, {
+      ...catalogScope(
+        catalogSettings(config),
+        config.SiteConfig.M3u8Only === true
+      ),
+    });
+    if (cached) return cached;
+  }
+  const detailUrl = cmsUrl(apiSite.api, { ac: 'videolist', ids: id });
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -326,6 +431,15 @@ export async function getDetailFromApiV2(
   }
 
   const videoDetail = data.list[0];
+  const indexed = await persistCatalogItem(apiSite, videoDetail);
+  if (indexed) {
+    const selected = filterM3u8SourceResult(
+      { ...indexed.result, catalog_play_lines: indexed.playLines },
+      config.SiteConfig.M3u8Only === true
+    );
+    if (!selected) throw new Error('当前全局设置仅允许 M3U8 线路');
+    return selected;
+  }
   let episodes: string[] = [];
   let titles: string[] = [];
 

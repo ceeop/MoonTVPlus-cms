@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import {
+  catalogScope,
+  catalogSettings,
+  catalogSourceEnabled,
+} from '@/lib/catalog/model';
+import { getCatalogStore } from '@/lib/catalog/store';
 import { API_CONFIG, getAvailableApiSites, getConfig } from '@/lib/config';
 import { parseJsonLosslessIntegers } from '@/lib/json';
 import { yellowWords } from '@/lib/yellow';
@@ -29,10 +35,7 @@ export async function GET(request: NextRequest) {
   const specialOnly = searchParams.get('special') === '1';
 
   if (!sourceKey) {
-    return NextResponse.json(
-      { error: '缺少参数: source' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: '缺少参数: source' }, { status: 400 });
   }
 
   try {
@@ -44,6 +47,39 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { error: `未找到指定的视频源: ${sourceKey}` },
         { status: 404 }
+      );
+    }
+
+    if (
+      searchParams.get('online') !== '1' &&
+      catalogSourceEnabled(config, targetSite.key)
+    ) {
+      const store = getCatalogStore();
+      const rows = await store.categories(targetSite, {
+        ...catalogScope(catalogSettings(config)),
+        excludeRestricted: !config.SiteConfig.DisableYellowFilter,
+      });
+      const categories = new Map<
+        string,
+        { id: string; name: string; pid: string }
+      >();
+      rows.forEach((row) => {
+        const name = String(row.type_name) || '其他';
+        if (
+          row.type_id &&
+          (config.SiteConfig.DisableYellowFilter ||
+            !yellowWords.some((word) => name.includes(word)))
+        ) {
+          categories.set(String(row.type_id), {
+            id: String(row.type_id),
+            name,
+            pid: '0',
+          });
+        }
+      });
+      return NextResponse.json(
+        { categories: Array.from(categories.values()) },
+        { headers: { 'Cache-Control': 'private, no-store' } }
       );
     }
 
@@ -87,9 +123,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error('Failed to get categories:', error);
-    return NextResponse.json(
-      { error: '获取分类列表失败' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: '获取分类列表失败' }, { status: 500 });
   }
 }

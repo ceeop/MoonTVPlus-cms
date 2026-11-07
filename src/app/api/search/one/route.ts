@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { catalogSourceEnabled } from '@/lib/catalog/model';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 import {
@@ -118,7 +119,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const results = await searchFromApi(targetSite, query);
+    const results = await searchFromApi(targetSite, query, searchParams.get('online') === '1');
     let result = results.filter((r) => r.title === query);
     if (!config.SiteConfig.DisableYellowFilter) {
       result = result.filter((result) => {
@@ -127,6 +128,9 @@ export async function GET(request: NextRequest) {
       });
     }
     const cacheTime = await getCacheTime();
+    if (result.length > 0 && catalogSourceEnabled(config, targetSite.key)) {
+      return NextResponse.json({ results: result }, { headers: { 'Cache-Control': 'private, no-store' } });
+    }
 
     if (result.length === 0) {
       return NextResponse.json(

@@ -91,13 +91,13 @@ function createStorage(): IStorage {
 
 /**
  * 获取 Postgres 适配器
- * 使用 Vercel Postgres (@vercel/postgres)
+ * 使用 pg 连接标准 PostgreSQL 数据库
  */
-function getPostgresAdapter(): any {
+export function getPostgresAdapter(): any {
   // 动态导入适配器以避免客户端打包
   const { PostgresAdapter } = require('./postgres-adapter');
 
-  console.log('Using Vercel Postgres database');
+  console.log('Using PostgreSQL database');
 
   return new PostgresAdapter();
 }
@@ -107,7 +107,7 @@ function getPostgresAdapter(): any {
  * 使用 @libsql/client 连接 Turso (libSQL) 远程数据库
  * 适用于 EdgeOne Pages 等无内置数据库的边缘平台
  */
-function getTursoAdapter(): any {
+export function getTursoAdapter(): any {
   // 动态导入适配器以避免客户端打包
   const { TursoAdapter } = require('./turso-adapter');
 
@@ -130,7 +130,7 @@ function getTursoAdapter(): any {
  * 开发环境：使用 better-sqlite3
  * 生产环境：使用 Cloudflare D1
  */
-function getD1Adapter(): any {
+export function getD1Adapter(): any {
   // 动态导入适配器以避免客户端打包
   const { CloudflareD1Adapter, SQLiteAdapter } = require('./d1-adapter');
 

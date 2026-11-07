@@ -2,6 +2,8 @@
 
 'use client';
 
+import M3u8OnlyToggle from '@/components/M3u8OnlyToggle';
+import { compileCustomAdFilter } from '@/lib/hls-ad-filter';
 import {
   closestCenter,
   DndContext,
@@ -82,6 +84,8 @@ import {
 import { MAIN_SOURCE_NAME } from '@/lib/openlist-sources';
 
 import AnimeSubscriptionComponent from '@/components/AnimeSubscriptionComponent';
+import CatalogAdmin from '@/components/CatalogAdmin';
+import CatalogTaxonomyAdmin from '@/components/CatalogTaxonomyAdmin';
 import CorrectDialog from '@/components/CorrectDialog';
 import DataMigration from '@/components/DataMigration';
 import OpenListPathInput from '@/components/OpenListPathInput';
@@ -389,6 +393,7 @@ interface SiteConfig {
   DoubanImageProxyType: string;
   DoubanImageProxy: string;
   DisableYellowFilter: boolean;
+  M3u8Only?: boolean;
   FluidSearch: boolean;
   DanmakuSourceType?: 'builtin' | 'custom';
   DanmakuApiBase: string;
@@ -7854,25 +7859,31 @@ const VideoSourceConfig = ({
             className='w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600'
           />
         </td>
-        <td className='px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100'>
+        <td
+          className='max-w-[10rem] truncate px-3 py-4 text-sm text-gray-900 dark:text-gray-100'
+          title={source.name}
+        >
           {source.name}
         </td>
-        <td className='px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100'>
+        <td
+          className='max-w-[10rem] truncate px-3 py-4 text-sm text-gray-900 dark:text-gray-100'
+          title={source.key}
+        >
           {source.key}
         </td>
         <td
-          className='px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100 max-w-[12rem] truncate'
+          className='px-3 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100 max-w-[12rem] truncate'
           title={source.api}
         >
           {source.api}
         </td>
         <td
-          className='px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100 max-w-[8rem] truncate'
+          className='px-3 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100 max-w-[8rem] truncate'
           title={source.detail || '-'}
         >
           {source.detail || '-'}
         </td>
-        <td className='px-6 py-4 whitespace-nowrap max-w-[1rem]'>
+        <td className='px-3 py-4 whitespace-nowrap'>
           <span
             className={`px-2 py-1 text-xs rounded-full ${
               !source.disabled
@@ -7883,7 +7894,7 @@ const VideoSourceConfig = ({
             {!source.disabled ? '启用中' : '已禁用'}
           </span>
         </td>
-        <td className='px-6 py-4 whitespace-nowrap text-center'>
+        <td className='px-3 py-4 whitespace-nowrap text-center'>
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -7908,7 +7919,7 @@ const VideoSourceConfig = ({
             />
           </button>
         </td>
-        <td className='px-6 py-4 whitespace-nowrap max-w-[1rem]'>
+        <td className='px-3 py-4 whitespace-nowrap'>
           {(() => {
             const status = getValidationStatus(source.key);
             if (!status) {
@@ -7928,43 +7939,45 @@ const VideoSourceConfig = ({
             );
           })()}
         </td>
-        <td className='px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2'>
-          <button
-            onClick={() => handleToggleEnable(source.key)}
-            disabled={isLoading(`toggleSource_${source.key}`)}
-            className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium ${
-              !source.disabled
-                ? buttonStyles.roundedDanger
-                : buttonStyles.roundedSuccess
-            } transition-colors ${
-              isLoading(`toggleSource_${source.key}`)
-                ? 'opacity-50 cursor-not-allowed'
-                : ''
-            }`}
-          >
-            {!source.disabled ? '禁用' : '启用'}
-          </button>
-          {source.from !== 'config' && (
-            <>
-              <button
-                onClick={() => handleEditSource(source)}
-                className={buttonStyles.roundedPrimary}
-              >
-                编辑
-              </button>
-              <button
-                onClick={() => handleDelete(source.key)}
-                disabled={isLoading(`deleteSource_${source.key}`)}
-                className={`${buttonStyles.roundedSecondary} ${
-                  isLoading(`deleteSource_${source.key}`)
-                    ? 'opacity-50 cursor-not-allowed'
-                    : ''
-                }`}
-              >
-                删除
-              </button>
-            </>
-          )}
+        <td className='px-3 py-4 text-sm font-medium'>
+          <div className='flex flex-wrap justify-end gap-2'>
+            <button
+              onClick={() => handleToggleEnable(source.key)}
+              disabled={isLoading(`toggleSource_${source.key}`)}
+              className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium ${
+                !source.disabled
+                  ? buttonStyles.roundedDanger
+                  : buttonStyles.roundedSuccess
+              } transition-colors ${
+                isLoading(`toggleSource_${source.key}`)
+                  ? 'opacity-50 cursor-not-allowed'
+                  : ''
+              }`}
+            >
+              {!source.disabled ? '禁用' : '启用'}
+            </button>
+            {source.from !== 'config' && (
+              <>
+                <button
+                  onClick={() => handleEditSource(source)}
+                  className={buttonStyles.roundedPrimary}
+                >
+                  编辑
+                </button>
+                <button
+                  onClick={() => handleDelete(source.key)}
+                  disabled={isLoading(`deleteSource_${source.key}`)}
+                  className={`${buttonStyles.roundedSecondary} ${
+                    isLoading(`deleteSource_${source.key}`)
+                      ? 'opacity-50 cursor-not-allowed'
+                      : ''
+                  }`}
+                >
+                  删除
+                </button>
+              </>
+            )}
+          </div>
         </td>
       </tr>
     );
@@ -8549,11 +8562,25 @@ const VideoSourceConfig = ({
 
       {/* 视频源表格 */}
       <div
-        className='border border-gray-200 dark:border-gray-700 rounded-lg max-h-[28rem] overflow-y-auto overflow-x-auto relative'
+        className='relative w-full min-w-0 overflow-x-auto rounded-lg border border-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 [scrollbar-width:thin] [&::-webkit-scrollbar]:block [&::-webkit-scrollbar]:h-2 dark:border-gray-700'
         data-table='source-list'
+        role='region'
+        aria-label='视频源列表'
+        tabIndex={0}
       >
-        <table className='min-w-full divide-y divide-gray-200 dark:divide-gray-700'>
-          <thead className='bg-gray-50 dark:bg-gray-900 sticky top-0 z-10'>
+        <table className='w-full min-w-[48rem] table-fixed divide-y divide-gray-200 dark:divide-gray-700'>
+          <colgroup>
+            <col className='w-10' />
+            <col className='w-[14%]' />
+            <col className='w-[12%]' />
+            <col />
+            <col className='w-[11%]' />
+            <col className='w-20' />
+            <col className='w-[76px]' />
+            <col className='w-[104px]' />
+            <col className='w-[88px]' />
+          </colgroup>
+          <thead className='bg-gray-50 dark:bg-gray-900 [&_th]:whitespace-nowrap [&_th]:px-3'>
             <tr>
               <th className='w-12 px-2 py-3 text-center'>
                 <input
@@ -9362,7 +9389,7 @@ const CategoryConfig = ({
       {/* 添加分类表单 */}
       <div className='flex items-center justify-between'>
         <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
-          自定义分类列表
+          豆瓣片单分类列表
         </h4>
         <button
           onClick={() => setShowAddForm(!showAddForm)}
@@ -11602,6 +11629,7 @@ const SiteConfigComponent = ({
     DoubanImageProxyType: 'cmliussss-cdn-tencent',
     DoubanImageProxy: '',
     DisableYellowFilter: false,
+    M3u8Only: false,
     FluidSearch: true,
     DanmakuSourceType: 'builtin',
     DanmakuApiBase: 'https://mtvpls-danmu.netlify.app/87654321',
@@ -11726,6 +11754,7 @@ const SiteConfigComponent = ({
           config.SiteConfig.DoubanImageProxyType || 'cmliussss-cdn-tencent',
         DoubanImageProxy: config.SiteConfig.DoubanImageProxy || '',
         DisableYellowFilter: config.SiteConfig.DisableYellowFilter || false,
+        M3u8Only: config.SiteConfig.M3u8Only === true,
         FluidSearch: config.SiteConfig.FluidSearch || true,
         DanmakuSourceType: config.SiteConfig.DanmakuSourceType || 'custom',
         DanmakuApiBase:
@@ -12220,6 +12249,11 @@ const SiteConfigComponent = ({
           className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
         />
       </div>
+
+      <M3u8OnlyToggle
+        enabled={siteSettings.M3u8Only === true}
+        onChange={(enabled) => setSiteSettings((prev) => ({ ...prev, M3u8Only: enabled }))}
+      />
 
       {/* 禁用黄色过滤器 */}
       <div>
@@ -14260,92 +14294,15 @@ const CustomAdFilterConfig = ({
   const { isLoading, withLoading } = useLoadingState();
   const [adFilterCode, setAdFilterCode] = useState('');
 
-  // 默认去广告代码
-  const defaultAdFilterCode = `function filterAdsFromM3U8(type: string, m3u8Content: string): string {
-  if (!m3u8Content) return '';
-
-  // 广告关键字列表
-  const adKeywords = [
-    'sponsor',
-    '/ad/',
-    '/ads/',
-    'advert',
-    'advertisement',
-    '/adjump',
-    'redtraffic'
-  ];
-
-  // 按行分割M3U8内容
-  const lines = m3u8Content.split('\\n');
-  const filteredLines = [];
-
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // 跳过 #EXT-X-DISCONTINUITY 标识
-    if (line.includes('#EXT-X-DISCONTINUITY')) {
-      i++;
-      continue;
-    }
-
-    // 如果是 EXTINF 行，检查下一行 URL 是否包含广告关键字
-    if (line.includes('#EXTINF:')) {
-      // 检查下一行 URL 是否包含广告关键字
-      if (i + 1 < lines.length) {
-        const nextLine = lines[i + 1];
-        const containsAdKeyword = adKeywords.some(keyword =>
-          nextLine.toLowerCase().includes(keyword.toLowerCase())
-        );
-
-        if (containsAdKeyword) {
-          // 跳过 EXTINF 行和 URL 行
-          i += 2;
-          continue;
-        }
-      }
-    }
-
-    // 保留当前行
-    filteredLines.push(line);
-    i++;
-  }
-
-  return filteredLines.join('\\n');
-}`;
-
   useEffect(() => {
     // 从数据库配置读取自定义去广告代码
     if (config?.SiteConfig?.CustomAdFilterCode) {
       setAdFilterCode(config.SiteConfig.CustomAdFilterCode);
     } else {
-      // 如果数据库没有保存的代码，使用默认代码
-      setAdFilterCode(defaultAdFilterCode);
+      setAdFilterCode('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
-
-  // 移除 TypeScript 类型注解，转换为纯 JavaScript
-  const removeTypeAnnotations = (code: string): string => {
-    return (
-      code
-        // 移除函数参数的类型注解：name: type
-        .replace(
-          /(\w+)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*([,)])/g,
-          '$1$3'
-        )
-        // 移除函数返回值类型注解：): type {
-        .replace(
-          /\)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*\{/g,
-          ') {'
-        )
-        // 移除变量声明的类型注解：const name: type =
-        .replace(
-          /(const|let|var)\s+(\w+)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*=/g,
-          '$1 $2 ='
-        )
-    );
-  };
 
   // 保存自定义去广告代码
   const handleSave = async () => {
@@ -14353,14 +14310,7 @@ const CustomAdFilterConfig = ({
       try {
         // 验证代码语法
         try {
-          // 移除类型注解后验证
-          const jsCode = removeTypeAnnotations(adFilterCode);
-          // 使用 Function 构造器验证代码是否可以解析
-          new Function(
-            'type',
-            'm3u8Content',
-            jsCode + '\nreturn filterAdsFromM3U8(type, m3u8Content);'
-          );
+          if (adFilterCode.trim()) compileCustomAdFilter(adFilterCode);
         } catch (parseError) {
           console.error('代码验证失败:', parseError);
           showError(
@@ -14408,10 +14358,10 @@ const CustomAdFilterConfig = ({
     });
   };
 
-  // 重置为默认代码
+  // 留空时始终使用与网页、TVBox 共用的内置规则。
   const handleReset = () => {
-    setAdFilterCode(defaultAdFilterCode);
-    showSuccess('已重置为默认代码', showAlert);
+    setAdFilterCode('');
+    showSuccess('已选择内置规则，保存后生效', showAlert);
   };
 
   if (!config) {
@@ -14456,7 +14406,8 @@ const CustomAdFilterConfig = ({
               filterAdsFromM3U8(type, m3u8Content)
             </code>
           </p>
-          <p>• type 参数为视频源类型，m3u8Content 为播放列表内容</p>
+          <p>• 留空使用内置去广告规则；填写代码会覆盖内置规则</p>
+          <p>• type 参数为视频源标识，m3u8Content 为播放列表内容</p>
           <p>• 函数需要返回处理后的 M3U8 内容</p>
           <p>• 支持 TypeScript 类型注解，保存时会自动转换为 JavaScript</p>
         </div>
@@ -14480,7 +14431,7 @@ const CustomAdFilterConfig = ({
             value={adFilterCode}
             onChange={(e) => setAdFilterCode(e.target.value)}
             rows={25}
-            placeholder='请输入自定义去广告代码...'
+            placeholder='留空使用内置去广告规则，或填写 filterAdsFromM3U8 函数'
             className='w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-mono text-sm leading-relaxed resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 hover:border-gray-400 dark:hover:border-gray-500'
             style={{
               fontFamily:
@@ -19266,8 +19217,17 @@ function AdminPageClient() {
   // PC 左右布局：当前选中的区块（单选），持久化以便保存刷新后仍停留在原区块
   const [activeKey, setActiveKey] = useState<string>(() => {
     if (typeof window === 'undefined') return 'siteConfig';
-    return localStorage.getItem('admin_active_section') || 'siteConfig';
+    const savedSection = localStorage.getItem('admin_active_section');
+    return savedSection && savedSection !== 'tvbox' ? savedSection : 'siteConfig';
   });
+  useEffect(() => {
+    const section = new URLSearchParams(window.location.search).get('section');
+    if (section === 'catalog' || section === 'catalogTaxonomy') {
+      setActiveKey(section);
+      setExpandedTabs((current) => ({ ...current, [section]: true }));
+      localStorage.setItem('admin_active_section', section);
+    }
+  }, []);
   // PC 内容区滚动容器，切换区块时回到顶部
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
   // PC 侧边栏中分组的展开状态
@@ -19591,6 +19551,18 @@ function AdminPageClient() {
       render: () => <VideoSourceScriptLab />,
     },
     {
+      key: 'catalog',
+      title: '本地片库',
+      icon: <Video size={20} className={navIconClass} />,
+      render: () => <CatalogAdmin />,
+    },
+    {
+      key: 'catalogTaxonomy',
+      title: '分类管理',
+      icon: <FolderOpen size={20} className={navIconClass} />,
+      render: () => <CatalogTaxonomyAdmin />,
+    },
+    {
       key: 'musicConfig',
       title: '音乐配置',
       icon: (
@@ -19744,7 +19716,7 @@ function AdminPageClient() {
     },
     {
       key: 'categoryConfig',
-      title: '分类配置',
+      title: '豆瓣片单分类',
       icon: <FolderOpen size={20} className={navIconClass} />,
       render: () => (
         <CategoryConfig config={config} refreshConfig={fetchConfig} />
@@ -20036,6 +20008,24 @@ function AdminPageClient() {
               />
             </CollapsibleTab>
 
+            <CollapsibleTab
+              title='本地片库'
+              icon={<Video size={20} className='text-gray-600 dark:text-gray-400' />}
+              isExpanded={expandedTabs.catalog}
+              onToggle={() => toggleTab('catalog')}
+            >
+              <CatalogAdmin />
+            </CollapsibleTab>
+
+            <CollapsibleTab
+              title='分类管理'
+              icon={<FolderOpen size={20} className='text-gray-600 dark:text-gray-400' />}
+              isExpanded={expandedTabs.catalogTaxonomy}
+              onToggle={() => toggleTab('catalogTaxonomy')}
+            >
+              <CatalogTaxonomyAdmin />
+            </CollapsibleTab>
+
             {/* 视频源配置标签 */}
             <CollapsibleTab
               title='视频源配置'
@@ -20311,7 +20301,7 @@ function AdminPageClient() {
 
             {/* 分类配置标签 */}
             <CollapsibleTab
-              title='分类配置'
+              title='豆瓣片单分类'
               icon={
                 <FolderOpen
                   size={20}

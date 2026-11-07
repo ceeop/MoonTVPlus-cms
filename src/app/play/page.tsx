@@ -105,6 +105,7 @@ import {
   createAdFilteringHlsLoader,
   loadCustomAdFilterCode,
 } from '@/lib/hls-ad-filter.client';
+import { buildHlsAdProxyUrl, prepareHlsPlaybackUrl } from '@/lib/hls-playback-url';
 import { useEnableAIComments } from '@/hooks/useEnableAIComments';
 import { useEnableComments } from '@/hooks/useEnableComments';
 import { useWatchRoomContextSafe } from '@/components/WatchRoomProvider';
@@ -4467,7 +4468,6 @@ function PlayPageClient() {
       return;
     }
 
-    const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
     const origin = `${window.location.protocol}//${window.location.host}`;
 
     let successCount = 0;
@@ -4486,7 +4486,7 @@ function PlayPageClient() {
       const proxyUrl = offlineMode
         ? episodeUrl  // 离线下载不使用代理，直接使用原始URL
         : (externalPlayerAdBlock
-          ? `${origin}/api/proxy-m3u8?url=${encodeURIComponent(episodeUrl)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+          ? buildHlsAdProxyUrl(episodeUrl, { origin, source: currentSource, token: proxyToken, absolute: true })
           : episodeUrl);
 
       const isM3u8 = episodeUrl.toLowerCase().includes('.m3u8') || episodeUrl.toLowerCase().includes('/m3u8/');
@@ -4655,48 +4655,13 @@ function PlayPageClient() {
   const buildNativeHlsPlaybackUrl = (url: string) => {
     if (!url || typeof window === 'undefined') return url;
 
-    try {
-      const isAbsoluteUrl = /^https?:\/\//i.test(url);
-      const parsedUrl = new URL(url, window.location.origin);
-
-      // 已经走服务端去广告代理时，只切换过滤参数，避免重复嵌套代理。
-      if (parsedUrl.pathname === '/api/proxy-m3u8') {
-        if (nativeHlsAdBlockEnabled) {
-          parsedUrl.searchParams.delete('adblock');
-        } else {
-          parsedUrl.searchParams.set('adblock', 'false');
-        }
-        return isAbsoluteUrl
-          ? parsedUrl.toString()
-          : `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
-      }
-
-      if (!nativeHlsAdBlockEnabled) return url;
-
-      let originalUrl = url;
-      let proxySegments = false;
-
-      // 保留视频源原有的全量代理能力，同时改由 proxy-m3u8 执行去广告。
-      if (parsedUrl.pathname === '/api/proxy/vod/m3u8') {
-        originalUrl = parsedUrl.searchParams.get('url') || '';
-        proxySegments = true;
-      } else if (parsedUrl.pathname === '/api/proxy/m3u8') {
-        originalUrl = parsedUrl.searchParams.get('url') || '';
-      }
-
-      if (!/^https?:\/\//i.test(originalUrl)) return url;
-
-      const params = new URLSearchParams({
-        url: originalUrl,
-        source: currentSourceRef.current,
-      });
-      if (proxyToken) params.set('token', proxyToken);
-      if (proxySegments) params.set('proxySegments', 'true');
-      return `/api/proxy-m3u8?${params.toString()}`;
-    } catch (error) {
-      console.warn('[Harmony HLS] 构建原生去广告地址失败:', error);
-      return url;
-    }
+    return prepareHlsPlaybackUrl(url, {
+      origin: window.location.origin,
+      source: currentSourceRef.current,
+      token: proxyToken,
+      adBlock: nativeHlsAdBlockEnabled,
+      serverFilter: true,
+    });
   };
 
   const switchHarmonyHlsPlaybackMode = (mode: HarmonyHlsPlaybackMode) => {
@@ -5176,6 +5141,7 @@ function PlayPageClient() {
     ): Promise<SearchResult[]> => {
       try {
         let url = appendSpecialSourceParam(`/api/source-detail?source=${source}&id=${id}&title=${encodeURIComponent(title)}`);
+        if (searchParams.get('fresh') === '1') url += '&fresh=1';
         // 如果有fileName参数（小雅源），添加到URL
         if (fileNameParam) {
           url += `&fileName=${encodeURIComponent(fileNameParam)}`;
@@ -5343,7 +5309,7 @@ function PlayPageClient() {
       }
 
       try {
-        const cacheKey = `search_cache_${query.trim()}${isSpecialSourceContext() ? '_special' : ''}`;
+        const cacheKey = `search_cache_${query.trim()}${isSpecialSourceContext() ? '_special' : ''}_unified${(window as any).RUNTIME_CONFIG?.M3U8_ONLY ? '_m3u8' : ''}`;
         const cached = sessionStorage.getItem(cacheKey);
         if (!cached) return null;
 
@@ -5364,7 +5330,7 @@ function PlayPageClient() {
       if (typeof window === 'undefined' || !query.trim()) return;
 
       try {
-        const cacheKey = `search_cache_${query.trim()}${isSpecialSourceContext() ? '_special' : ''}`;
+        const cacheKey = `search_cache_${query.trim()}${isSpecialSourceContext() ? '_special' : ''}_unified${(window as any).RUNTIME_CONFIG?.M3U8_ONLY ? '_m3u8' : ''}`;
         const payload: SearchCachePayload = {
           status: 'complete',
           results,
@@ -5596,8 +5562,17 @@ function PlayPageClient() {
           setBackgroundSourcesLoading(false);
         });
       } else {
-        // 没有source和id，正常搜索流程
-        sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
+        // 聚合卡片也可用已返回的片库/源结果先播放，其余源在后台补全。
+        sourcesInfo = getCachedSourcesData(searchTitle || videoTitle);
+        if (sourcesInfo.length > 0) {
+          setBackgroundSourcesLoading(true);
+          fetchSourcesData(searchTitle || videoTitle).then(
+            () => setBackgroundSourcesLoading(false),
+            () => setBackgroundSourcesLoading(false)
+          );
+        } else {
+          sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
+        }
       }
 
       if (!detailData && sourcesInfo.length === 0) {
@@ -7411,6 +7386,7 @@ function PlayPageClient() {
 
     // WebKit浏览器或首次创建：销毁之前的播放器实例并创建新的
     // 异步初始化播放器
+    let playerInitCancelled = false;
     const initPlayer = async () => {
       try {
         // 先清理旧播放器实例
@@ -7420,6 +7396,7 @@ function PlayPageClient() {
 
         // iOS需要等待DOM完全清理
         await new Promise(resolve => setTimeout(resolve, 100));
+        if (playerInitCancelled) return;
 
         // 双重检查：如果旧播放器仍然存在，再次清理
         if (artPlayerRef.current) {
@@ -7448,6 +7425,7 @@ function PlayPageClient() {
           import('@/lib/artplayer-plugin-auto-thumbnail'),
         ]);
 
+        if (playerInitCancelled) return;
         const Artplayer = ArtplayerModule.default;
         const Hls = HlsModule.default;
         const artplayerPluginDanmuku = DanmukuPlugin.default as any;
@@ -7576,6 +7554,11 @@ function PlayPageClient() {
           });
         };
 
+        // Load custom rules before the first manifest can arrive.
+        if (blockAdEnabledRef.current) {
+          customAdFilterCodeRef.current = await loadCustomAdFilterCode();
+        }
+        if (playerInitCancelled) return;
         // 创建自定义 HLS loader（去广告逻辑见 lib/hls-ad-filter.client）
         const CustomHlsJsLoader = createAdFilteringHlsLoader(
           Hls,
@@ -7794,8 +7777,14 @@ function PlayPageClient() {
               // 先暴露真实 m3u8 source，供浏览器的投屏/外部播放器在
               // hls.js 将 video.currentSrc 切换为 blob: URL 前完成识别。
               video.hls = hls;
-              ensureVideoSource(video, url);
-              hls.loadSource(url);
+              const playbackUrl = prepareHlsPlaybackUrl(url, {
+                origin: window.location.origin,
+                source: currentSourceRef.current,
+                token: proxyToken,
+                adBlock: shouldUseCustomLoader,
+              });
+              ensureVideoSource(video, playbackUrl);
+              hls.loadSource(playbackUrl);
               hls.attachMedia(video);
 
               if (isWebkit) {
@@ -10349,6 +10338,7 @@ function PlayPageClient() {
 
     // 调用异步初始化函数
     initPlayer();
+    return () => { playerInitCancelled = true; };
   }, [
     videoUrl,
     loading,
@@ -10945,6 +10935,22 @@ function PlayPageClient() {
                             >
                               重试
                             </button>
+                            {currentSource && currentId && !isDirectPlay && (
+                              <button
+                                onClick={() => {
+                                  const url = new URL(window.location.href);
+                                  url.searchParams.set('source', currentSource);
+                                  url.searchParams.set('id', currentId);
+                                  url.searchParams.set('episode', String(currentEpisodeIndex + 1));
+                                  url.searchParams.set('fresh', '1');
+                                  url.searchParams.set('_reload', String(Date.now()));
+                                  window.location.assign(url.toString());
+                                }}
+                                className='mt-4 ml-3 min-h-[44px] rounded-lg bg-gray-700 px-5 py-2 text-white hover:bg-gray-600'
+                              >
+                                刷新播放地址
+                              </button>
+                            )}
                             {/* 直链播放 CORS 失败时，显示"使用代理播放"按钮 */}
                             {!proxyAttemptedRef.current && (corsFailedUrl || (isDirectPlay && videoUrl && !videoUrl.includes('/api/proxy-m3u8'))) && (
                               <button
@@ -11110,9 +11116,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL（与外部播放器逻辑一致）
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
 
                             // 如果链接是相对路径，补充完整的 base URL
@@ -11334,9 +11339,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
                             // URL encode 避免冒号被吃掉
                             window.open(`potplayer://${proxyUrl}`, '_blank');
@@ -11364,9 +11368,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
                             // URL encode 避免冒号被吃掉
                             window.open(`vlc://${proxyUrl}`, '_blank');
@@ -11394,9 +11397,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
                             // URL encode 避免冒号被吃掉
                             window.open(`mpv://${proxyUrl}`, '_blank');
@@ -11424,9 +11426,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
                             window.open(
                               `intent://${proxyUrl}#Intent;package=com.mxtech.videoplayer.ad;S.title=${encodeURIComponent(
@@ -11458,9 +11459,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
                             window.open(`nplayer-${proxyUrl}`, '_blank');
                           }}
@@ -11487,9 +11487,8 @@ function PlayPageClient() {
                               urlToUse = detail.episodes[currentEpisodeIndex];
                             }
                             // 使用代理 URL
-                            const tokenParam = proxyToken ? `&token=${encodeURIComponent(proxyToken)}` : '';
                             const proxyUrl = externalPlayerAdBlock
-                              ? `${window.location.origin}/api/proxy-m3u8?url=${encodeURIComponent(urlToUse)}&source=${encodeURIComponent(currentSource)}${tokenParam}`
+                              ? buildHlsAdProxyUrl(urlToUse, { origin: window.location.origin, source: currentSource, token: proxyToken, absolute: true })
                               : urlToUse;
                             window.open(
                               `iina://weblink?url=${encodeURIComponent(

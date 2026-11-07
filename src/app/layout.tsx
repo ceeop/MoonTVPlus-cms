@@ -30,7 +30,7 @@ export const dynamic = 'force-dynamic';
 // 动态生成 metadata，支持配置更新后的标题变化
 export async function generateMetadata(): Promise<Metadata> {
   const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
-  const config = await getConfig();
+  const config = await getConfig(true);
   let siteName = process.env.NEXT_PUBLIC_SITE_NAME || 'MoonTVPlus';
   if (storageType !== 'localstorage') {
     siteName = config.SiteConfig.SiteName;
@@ -80,7 +80,9 @@ export default async function RootLayout({
   let doubanImageProxy = process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY || '';
   let disableYellowFilter =
     process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true';
+  let m3u8Only = process.env.NEXT_PUBLIC_M3U8_ONLY === 'true';
   let fluidSearch = process.env.NEXT_PUBLIC_FLUID_SEARCH !== 'false';
+  let catalogEnabled = false;
   let enableComments = false;
   let danmakuAutoLoadDefault = true;
   let recommendationDataSource = 'Mixed';
@@ -159,7 +161,8 @@ export default async function RootLayout({
     const authInfo = parseAuthInfo(cookieStore.get('auth')?.value);
     userFeatureAccess = await getUserFeatureAccess(authInfo?.username);
 
-    const config = await getConfig();
+    const config = await getConfig(true);
+    catalogEnabled = config.CatalogConfig?.Enabled === true;
     siteName = config.SiteConfig.SiteName;
     announcement = config.SiteConfig.Announcement;
     announcementDisplayMode =
@@ -170,6 +173,7 @@ export default async function RootLayout({
     doubanImageProxyType = config.SiteConfig.DoubanImageProxyType;
     doubanImageProxy = config.SiteConfig.DoubanImageProxy;
     disableYellowFilter = config.SiteConfig.DisableYellowFilter;
+    m3u8Only = config.SiteConfig.M3u8Only === true;
     customCategories = config.CustomCategories.filter(
       (category) => !category.disabled
     ).map((category) => ({
@@ -307,6 +311,7 @@ export default async function RootLayout({
     DISABLE_YELLOW_FILTER: disableYellowFilter,
     CUSTOM_CATEGORIES: customCategories,
     FLUID_SEARCH: fluidSearch,
+    CATALOG_ENABLED: catalogEnabled,
     EnableComments: enableComments,
     DANMAKU_AUTO_LOAD_DEFAULT: danmakuAutoLoadDefault,
     RecommendationDataSource: recommendationDataSource,
@@ -357,6 +362,7 @@ export default async function RootLayout({
     WEB_LIVE_ENABLED: webLiveEnabled && userFeatureAccess.web_live,
     ADVANCED_RECOMMENDATION_ENABLED: advancedRecommendationEnabled,
     CUSTOM_AD_FILTER_VERSION: customAdFilterVersion,
+    M3U8_ONLY: m3u8Only,
     MUSIC_ENABLED: musicFeatureEnabled && userFeatureAccess.music,
     MUSIC_PROXY_ENABLED: musicProxyEnabled,
     SUWAYOMI_ENABLED: suwayomiEnabled && userFeatureAccess.manga,

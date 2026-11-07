@@ -311,6 +311,7 @@ async function getInitConfig(
       DisableYellowFilter:
         process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true',
       FluidSearch: process.env.NEXT_PUBLIC_FLUID_SEARCH !== 'false',
+      M3u8Only: process.env.NEXT_PUBLIC_M3U8_ONLY === 'true',
       // 弹幕配置
       DanmakuSourceType: hasCustomDanmakuEnv ? 'custom' : 'builtin',
       DanmakuApiBase:
@@ -443,7 +444,15 @@ async function getInitConfig(
   return adminConfig;
 }
 
-export async function getConfig(): Promise<AdminConfig> {
+export async function getConfig(fresh = false): Promise<AdminConfig> {
+  // Collectors and catalog requests may run in different serverless instances.
+  if (fresh && (process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage') !== 'localstorage') {
+    const latest = await db.getAdminConfig();
+    if (latest) {
+      cachedConfig = configSelfCheck(latest);
+      return cachedConfig;
+    }
+  }
   // 直接使用内存缓存
   if (cachedConfig) {
     return cachedConfig;
@@ -581,6 +590,7 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
       DefaultUserTags: [],
     };
   }
+  adminConfig.SiteConfig.M3u8Only = adminConfig.SiteConfig.M3u8Only === true;
   // 确保弹幕配置存在
   if (adminConfig.SiteConfig.DanmakuSourceType === undefined) {
     adminConfig.SiteConfig.DanmakuSourceType = 'custom';

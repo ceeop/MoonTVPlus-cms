@@ -1338,6 +1338,7 @@ function TVPlayClient() {
           onPlayingChange={setIsPlaying}
           onBufferingChange={setIsBuffering}
           adFilterEnabled={adFilterEnabled}
+          source={detail.source}
           playbackRate={playbackRate}
         />
       ) : (

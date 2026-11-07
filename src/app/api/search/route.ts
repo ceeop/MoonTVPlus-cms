@@ -3,10 +3,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { localCatalogSearch } from '@/lib/catalog/service';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 import { getProxyToken } from '@/lib/emby-token';
 import { hasFeaturePermission } from '@/lib/permissions';
+import { mergeSearchResults } from '@/lib/search-results';
+import { filterM3u8SourceResults } from '@/lib/m3u8-source-filter';
 import {
   executeSavedSourceScript,
   listEnabledSourceScripts,
@@ -43,7 +46,16 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const config = await getConfig();
+  const localResults = privateOnly
+    ? []
+    : await localCatalogSearch(authInfo.username, query, specialOnly).catch(
+        (error) => {
+          console.warn('[Search] 片库搜索失败，继续搜索各源:', error);
+          return [];
+        }
+      );
+
+  const config = await getConfig(true);
   const apiSites = privateOnly
     ? []
     : await getAvailableApiSites(authInfo.username, specialOnly);
@@ -58,7 +70,7 @@ export async function GET(request: NextRequest) {
 
   // 创建权重映射表
   const weightMap = new Map<string, number>();
-  config.SourceConfig.forEach(source => {
+  config.SourceConfig.forEach((source) => {
     weightMap.set(source.key, source.weight ?? 0);
   });
 
@@ -77,7 +89,10 @@ export async function GET(request: NextRequest) {
   const embySources = canAccessEmby ? Array.from(embySourcesMap.values()) : [];
 
   console.log('[Search] Emby sources count:', embySources.length);
-  console.log('[Search] Emby sources:', embySources.map(s => ({ key: s.config.key, name: s.config.name })));
+  console.log(
+    '[Search] Emby sources:',
+    embySources.map((s) => ({ key: s.config.key, name: s.config.name }))
+  );
 
   // 获取代理 token（用于图片代理）
   const proxyToken = await getProxyToken(request);
@@ -96,8 +111,10 @@ export async function GET(request: NextRequest) {
           });
 
           // 如果只有一个Emby源，保持旧格式（向后兼容）
-          const sourceValue = embySources.length === 1 ? 'emby' : `emby_${embyConfig.key}`;
-          const sourceName = embySources.length === 1 ? 'Emby' : embyConfig.name;
+          const sourceValue =
+            embySources.length === 1 ? 'emby' : `emby_${embyConfig.key}`;
+          const sourceName =
+            embySources.length === 1 ? 'Emby' : embyConfig.name;
 
           return searchResult.Items.map((item) => ({
             id: item.Id,
@@ -105,7 +122,12 @@ export async function GET(request: NextRequest) {
             source_name: sourceName,
             weight: weightMap.get(sourceValue) ?? 0,
             title: item.Name,
-            poster: client.getImageUrl(item.Id, 'Primary', undefined, client.isProxyEnabled() ? proxyToken || undefined : undefined),
+            poster: client.getImageUrl(
+              item.Id,
+              'Primary',
+              undefined,
+              client.isProxyEnabled() ? proxyToken || undefined : undefined
+            ),
             episodes: [],
             episodes_titles: [],
             year: item.ProductionYear?.toString() || '',
@@ -132,7 +154,9 @@ export async function GET(request: NextRequest) {
     ? Promise.race([
         (async () => {
           try {
-            const { getCachedMetaInfo, setCachedMetaInfo } = await import('@/lib/openlist-cache');
+            const { getCachedMetaInfo, setCachedMetaInfo } = await import(
+              '@/lib/openlist-cache'
+            );
             const { getTMDBImageUrl } = await import('@/lib/tmdb.search');
             const { db } = await import('@/lib/db');
 
@@ -151,8 +175,12 @@ export async function GET(request: NextRequest) {
             if (metaInfo && metaInfo.folders) {
               return Object.entries(metaInfo.folders)
                 .filter(([folderName, info]: [string, any]) => {
-                  const matchFolder = folderName.toLowerCase().includes(query.toLowerCase());
-                  const matchTitle = info.title.toLowerCase().includes(query.toLowerCase());
+                  const matchFolder = folderName
+                    .toLowerCase()
+                    .includes(query.toLowerCase());
+                  const matchTitle = info.title
+                    .toLowerCase()
+                    .includes(query.toLowerCase());
                   return matchFolder || matchTitle;
                 })
                 .map(([folderName, info]: [string, any]) => ({
@@ -188,7 +216,7 @@ export async function GET(request: NextRequest) {
   // 添加超时控制和错误处理，避免慢接口拖累整体响应
   const searchPromises = apiSites.map((site) =>
     Promise.race([
-      searchFromApi(site, query),
+      searchFromApi(site, query, searchParams.get('fresh') === '1', true),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`${site.name} timeout`)), 20000)
       ),
@@ -259,19 +287,36 @@ export async function GET(request: NextRequest) {
     // 添加安全检查，确保即使某个结果处理出错也不影响其他结果
     const openlistResults = Array.isArray(allResults[0]) ? allResults[0] : [];
     const embyResultsArray = allResults.slice(1, 1 + embyPromises.length);
-    const apiResults = allResults.slice(1 + embyPromises.length, 1 + embyPromises.length + searchPromises.length);
-    const scriptResults = allResults.slice(1 + embyPromises.length + searchPromises.length);
+    const apiResults = allResults.slice(
+      1 + embyPromises.length,
+      1 + embyPromises.length + searchPromises.length
+    );
+    const scriptResults = allResults.slice(
+      1 + embyPromises.length + searchPromises.length
+    );
 
     // 合并所有 Emby 结果，添加安全检查
     const embyResults = embyResultsArray.filter(Array.isArray).flat();
     const apiResultsFlat = apiResults.filter(Array.isArray).flat();
     const scriptResultsFlat = scriptResults.filter(Array.isArray).flat();
 
-    let flattenedResults = [...openlistResults, ...embyResults, ...apiResultsFlat, ...scriptResultsFlat];
+    let flattenedResults = mergeSearchResults(
+      localResults || [],
+      [
+        ...openlistResults,
+        ...embyResults,
+        ...apiResultsFlat,
+        ...scriptResultsFlat,
+      ].sort(
+        (a, b) =>
+          (b.weight ?? weightMap.get(b.source) ?? 0) -
+          (a.weight ?? weightMap.get(a.source) ?? 0)
+      )
+    );
 
     flattenedResults = flattenedResults.map((result) => ({
       ...result,
-      weight: result.weight ?? (weightMap.get(result.source) ?? 0),
+      weight: result.weight ?? weightMap.get(result.source) ?? 0,
     }));
 
     if (!config.SiteConfig.DisableYellowFilter) {
@@ -281,15 +326,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 按权重降序排序
-    flattenedResults.sort((a, b) => {
-      const weightA = a.weight ?? 0;
-      const weightB = b.weight ?? 0;
-      return weightB - weightA;
-    });
-
-    const cacheTime = await getCacheTime();
-
+    flattenedResults = filterM3u8SourceResults(flattenedResults, config.SiteConfig.M3u8Only === true);
     if (flattenedResults.length === 0) {
       // no cache if empty
       return NextResponse.json({ results: [] }, { status: 200 });
@@ -299,10 +336,7 @@ export async function GET(request: NextRequest) {
       { results: flattenedResults },
       {
         headers: {
-          'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-          'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Netlify-Vary': 'query',
+          'Cache-Control': 'private, no-store',
         },
       }
     );
