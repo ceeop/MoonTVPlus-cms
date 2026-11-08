@@ -2042,7 +2042,6 @@ function PlayPageClient() {
   const isInitialLoadRef = useRef(true); // 标记是否为首次加载
   // xiaoya 仅 m3u8 可续期；openlist 由 refresh14m 决定。用于 startRefreshTimer 自身兜底校验
   const linkRefreshEligibleRef = useRef(false);
-  const suppressPlayRecordJumpOnNextEpisodeChangeRef = useRef(false); // 主动切集时不显示播放记录跳转提示
 
   // 视频源代理模式状态
   const [sourceProxyMode, setSourceProxyMode] = useState(false);
@@ -2327,6 +2326,7 @@ function PlayPageClient() {
   const playRecordJumpDismissedRef = useRef(false); // 记录用户是否已经关闭过跳转按钮
   const playRecordJumpLayerRef = useRef<any>(null); // 保存跳转按钮层的引用
   const playRecordJumpInitialCheckRef = useRef(true); // 记录是否是首次检查播放记录
+  const suppressPlayRecordJumpOnNextEpisodeChangeRef = useRef(false);
   // 上次使用的音量，默认 0.7
   const lastVolumeRef = useRef<number>(0.7);
   // 上次使用的播放速率，默认 1.0
@@ -9808,9 +9808,18 @@ function PlayPageClient() {
 
         // 监听视频播放事件，检查是否需要显示播放记录跳转按钮
         artPlayerRef.current.on('video:playing', () => {
+          const player = artPlayerRef.current;
+          const requestSeq = videoUrlRequestSeqRef.current;
+          const isCurrentPlayback = () =>
+            player === artPlayerRef.current &&
+            requestSeq === videoUrlRequestSeqRef.current &&
+            !suppressPlayRecordJumpOnNextEpisodeChangeRef.current;
+
           // 检查是否需要显示播放记录跳转按钮
           // 条件：当前播放时间 < 10秒 且 播放记录时间 > 10秒
           const checkPlayRecordJump = async () => {
+            if (!player || !isCurrentPlayback()) return;
+
             try {
               // 短剧不显示"上次播放到"提示（短剧单集太短，提示意义不大）
               if (searchParams.get('duanju') === '1') {
@@ -9828,10 +9837,8 @@ function PlayPageClient() {
                 return;
               }
 
-              const currentTime = artPlayerRef.current?.currentTime || 0;
-
               // 如果当前播放时间已经大于等于10秒，不显示跳转按钮
-              if (currentTime >= 10) {
+              if (player.currentTime >= 10) {
                 // 标记已经进行过首次检查，避免切集后再显示
                 playRecordJumpInitialCheckRef.current = false;
                 if (playRecordJumpLayerRef.current) {
@@ -9842,12 +9849,17 @@ function PlayPageClient() {
               }
 
               // 获取播放记录
-              const allRecords = await getAllPlayRecords();
               const key = generateStorageKey(
                 currentSourceRef.current,
                 currentIdRef.current
               );
+              const allRecords = await getAllPlayRecords();
+              if (!isCurrentPlayback() || !playRecordJumpInitialCheckRef.current) {
+                return;
+              }
+
               const record = allRecords[key];
+              const currentTime = player.currentTime || 0;
 
               if (record) {
                 const recordIndex = record.index - 1;
@@ -9991,13 +10003,14 @@ function PlayPageClient() {
               }
             } catch (err) {
               console.error('[PlayRecordJump] 检查播放记录失败:', err);
-              // 即使出错也标记为已检查过
-              playRecordJumpInitialCheckRef.current = false;
+              if (isCurrentPlayback()) {
+                playRecordJumpInitialCheckRef.current = false;
+              }
             }
           };
 
           // 延迟检查，确保播放器已经稳定
-          setTimeout(checkPlayRecordJump, 500);
+          schedulePlayerTimeout(checkPlayRecordJump, 500);
         });
 
         // 监听视频时间更新事件，实现跳过片头片尾
@@ -10131,7 +10144,15 @@ function PlayPageClient() {
             const isFiltered = episodeTitle && isEpisodeFilteredByTitle(episodeTitle);
 
             if (!isFiltered) {
-              setTimeout(() => {
+              schedulePlayerTimeout(() => {
+                if (
+                  currentEpisodeIndexRef.current !== idx ||
+                  currentSourceRef.current !== d.source ||
+                  currentIdRef.current !== d.id
+                ) {
+                  return;
+                }
+                suppressPlayRecordJumpOnNextEpisodeChangeRef.current = true;
                 setCurrentEpisodeIndex(nextIdx);
               }, 1000);
               return;

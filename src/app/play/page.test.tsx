@@ -22,6 +22,7 @@ const detail = {
 };
 let mockSearchParams: URLSearchParams;
 const mockRouter = { prefetch: jest.fn(), push: jest.fn(), back: jest.fn() };
+const mockGetAllPlayRecords = jest.fn();
 let mockPlayer: MockArtplayer;
 
 class MockArtplayer {
@@ -76,9 +77,7 @@ jest.mock('next/navigation', () => ({
 jest.mock('@/contexts/DownloadContext', () => ({ useDownload: () => ({}) }));
 jest.mock('@/lib/db.client', () => ({
   generateStorageKey: () => 'cms+series',
-  getAllPlayRecords: async () => ({
-    'cms+series': { index: 4, play_time: 30 },
-  }),
+  getAllPlayRecords: () => mockGetAllPlayRecords(),
   getDanmakuFilterConfig: async () => undefined,
   getEpisodeFilterConfig: async () => undefined,
   getSkipConfig: async () => undefined,
@@ -132,11 +131,16 @@ jest.mock('@/components/SmartRecommendations', () => () => null);
 const originalFetch = global.fetch;
 const originalIndexedDB = window.indexedDB;
 afterEach(() => {
+  jest.useRealTimers();
   global.fetch = originalFetch;
   Object.defineProperty(window, 'indexedDB', { value: originalIndexedDB });
 });
 
-test('switches episodes manually and after playback ends with an episode link in the URL', async () => {
+test('switches episodes manually and automatically without showing resume prompts', async () => {
+  jest.useFakeTimers();
+  mockGetAllPlayRecords.mockResolvedValue({
+    'cms+series': { index: 3, play_time: 30 },
+  });
   mockSearchParams = new URLSearchParams({
     source: 'cms',
     id: 'series',
@@ -171,9 +175,27 @@ test('switches episodes manually and after playback ends with an episode link in
   );
   await waitFor(() => expect(mockPlayer?.option.url).toBe(episodes[0]));
 
+  let finishRecordRead = () => {};
+  mockGetAllPlayRecords.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishRecordRead = () =>
+          resolve({
+            'cms+series': { index: 2, play_time: 30 },
+          });
+      })
+  );
+  act(() => {
+    mockPlayer.emit('video:playing');
+    jest.advanceTimersByTime(500);
+  });
   fireEvent.click(second);
   await waitFor(() => expect(mockPlayer.option.url).toBe(episodes[1]));
   expect(second).toHaveAttribute('aria-pressed', 'true');
+  await act(async () => finishRecordRead());
+  expect(mockPlayer.layers.add).not.toHaveBeenCalledWith(
+    expect.objectContaining({ name: 'play-record-jump' })
+  );
 
   mockSearchParams = new URLSearchParams(`${mockSearchParams}&year=2026`);
   rerender(<PlayPage />);
@@ -183,6 +205,14 @@ test('switches episodes manually and after playback ends with an episode link in
   await waitFor(() => expect(mockPlayer.option.url).toBe(episodes[2]), {
     timeout: 2500,
   });
+
+  await act(async () => {
+    mockPlayer.emit('video:playing');
+    jest.advanceTimersByTime(500);
+  });
+  expect(mockPlayer.layers.add).not.toHaveBeenCalledWith(
+    expect.objectContaining({ name: 'play-record-jump' })
+  );
 
   mockSearchParams = new URLSearchParams({
     source: 'cms',
