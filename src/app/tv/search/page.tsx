@@ -7,6 +7,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { addSearchHistory, getSearchHistory } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
 import { processImageUrl } from '@/lib/utils';
+import { videoTitleMatchKey } from '@/lib/video-title';
 
 import TVLayout from '@/components/tv/TVLayout';
 
@@ -44,14 +45,6 @@ type TVSearchDisplayItem = {
   id?: string;
   isAggregate: boolean;
 };
-
-function normalizeTitle(title: string) {
-  return title
-    .trim()
-    .toLowerCase()
-    .replace(/[第\s._\-:：]+/g, '')
-    .replace(/[（(].*?[）)]/g, '');
-}
 
 function getResultType(item: SearchResult) {
   const text = `${item.type_name || ''} ${item.class || ''}`.toLowerCase();
@@ -121,7 +114,7 @@ export default function TVSearchPage() {
     const order: string[] = [];
 
     results.forEach((item) => {
-      const key = `${normalizeTitle(item.title)}-${getResultType(item)}-${getValidYear(item)}`;
+      const key = `${videoTitleMatchKey(item.title)}-${getResultType(item)}-${getValidYear(item)}`;
       if (!groups.has(key)) {
         groups.set(key, []);
         order.push(key);

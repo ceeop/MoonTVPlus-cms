@@ -6,6 +6,14 @@ import type { ApiSite } from '@/lib/config';
 import type { D1PreparedStatement, DatabaseAdapter } from '@/lib/d1-adapter';
 import { filterM3u8SourceResult } from '@/lib/m3u8-source-filter';
 import type { SearchResult } from '@/lib/types';
+import {
+  animatedComicSuffix,
+  invisibleVideoTitleChars,
+  isVerifiedVideoTitle,
+  seasonTitleAliasGroups,
+  verifiedVideoTitleAliases,
+  videoTitleMatchKey,
+} from '@/lib/video-title';
 
 import {
   type CatalogCategoryConfig,
@@ -18,6 +26,8 @@ import {
   CatalogCard,
   CatalogItem,
   CatalogKind,
+  catalogDoubanId,
+  catalogDoubanPlaceholders,
   catalogRetentionCutoff,
   normalizeTitle,
   sourceRevision,
@@ -29,6 +39,7 @@ import {
   downloadCatalogPoster,
   POSTER_PREFIX,
 } from './posters';
+import { repairCatalogPlaceholders } from './repair';
 
 type Row = Record<string, string | number>;
 export interface CatalogQuery {
@@ -65,6 +76,80 @@ export interface CatalogNavigationCategory {
   kind: string;
 }
 
+// Use the same season markers in SQLite, D1, Turso and PostgreSQL. An expression
+// index lets already indexed works match without changing their IDs or titles.
+function catalogVisibleTitle(column: string) {
+  return Array.from(invisibleVideoTitleChars).reduce(
+    (title, char) => `replace(${title}, '${char}', '')`,
+    column
+  );
+}
+
+const sqlText = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+// Expand reviewed titles to their equivalent explicit season spellings before
+// the generic CASE so the SQL does not have to repeat the season expression.
+const storedTitleAliases = Array.from(verifiedVideoTitleAliases)
+  .flatMap(([title, canonical]) => {
+    const spellings = [title];
+    const marker = title.match(/第\d+季/)?.[0];
+    if (marker) {
+      for (const [alias, number] of seasonTitleAliasGroups.flat()) {
+        if (number === marker) spellings.push(title.replace(marker, alias));
+      }
+    }
+    return spellings.map(
+      (spelling) => `WHEN ${sqlText(spelling)} THEN ${sqlText(canonical)}`
+    );
+  })
+  .join(' ');
+
+function catalogMatchTitle(column: string) {
+  const visible = catalogVisibleTitle(column);
+  const comic = `CASE WHEN ${visible} LIKE '%${animatedComicSuffix}' THEN '画' ELSE '' END`;
+  const seasons = seasonTitleAliasGroups
+    .map((aliases) => {
+      const markers = aliases
+        .map(([alias]) => `${visible} LIKE '%${alias}%'`)
+        .join(' OR ');
+      const normalized = aliases.reduce(
+        (title, [alias, canonical]) =>
+          `replace(${title}, '${alias}', '${canonical}')`,
+        visible
+      );
+      return `WHEN ${markers} THEN ${normalized}`;
+    })
+    .join(' ');
+  const spelling = `CASE WHEN ${visible} LIKE '%第%季%' THEN CASE ${seasons} ELSE ${visible} END ELSE ${visible} END`;
+  return `CASE ${visible} ${storedTitleAliases} ELSE (${spelling}) || (${comic}) END`;
+}
+
+const matchTitle = catalogMatchTitle('w.normalized_title');
+const storedMatchTitle = catalogMatchTitle('normalized_title');
+const hasInvisibleTitle = `normalized_title<>${catalogVisibleTitle(
+  'normalized_title'
+)}`;
+const invisibleTitleSearch = `w.id IN (SELECT id FROM catalog_works WHERE ${hasInvisibleTitle} AND (${storedMatchTitle}) LIKE ?)`;
+
+function catalogTitleQuery(value = '') {
+  const title = videoTitleMatchKey(normalizeTitle(value).slice(0, 40));
+  const season = /第\d+季/.exec(title);
+  const verified = isVerifiedVideoTitle(title);
+  const comic = title.endsWith(`${animatedComicSuffix}画`);
+  return {
+    title,
+    column:
+      season || verified || comic ? `(${matchTitle})` : 'w.normalized_title',
+    termText: verified
+      ? ''
+      : season
+      ? title.slice(0, season.index)
+      : comic
+      ? title.slice(0, -1)
+      : title,
+  };
+}
+
 const schema = [
   `CREATE TABLE IF NOT EXISTS catalog_works (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, normalized_title TEXT NOT NULL,
@@ -80,6 +165,7 @@ const schema = [
     lease_until BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS catalog_terms (
     term TEXT NOT NULL, work_id TEXT NOT NULL, PRIMARY KEY (term, work_id))`,
+  `CREATE TABLE IF NOT EXISTS catalog_work_redirects (id TEXT PRIMARY KEY, work_id TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS catalog_posters (
     id TEXT PRIMARY KEY, content_type TEXT NOT NULL, data TEXT NOT NULL, updated_at BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS catalog_resource_posters (
@@ -104,6 +190,8 @@ const schema = [
   'CREATE INDEX IF NOT EXISTS catalog_resources_browse ON catalog_resources(source_revision, source_key, type_id, restricted, indexed_at, work_id, source_updated_at, remote_id)',
   'CREATE INDEX IF NOT EXISTS catalog_works_filters ON catalog_works(kind, year, updated_at)',
   'CREATE INDEX IF NOT EXISTS catalog_works_match ON catalog_works(normalized_title, year)',
+  `CREATE INDEX IF NOT EXISTS catalog_works_title_match ON catalog_works((${storedMatchTitle}), year)`,
+  `CREATE INDEX IF NOT EXISTS catalog_works_invisible_title ON catalog_works(id) WHERE ${hasInvisibleTitle}`,
   'CREATE INDEX IF NOT EXISTS catalog_resources_age ON catalog_resources(indexed_at)',
   'CREATE INDEX IF NOT EXISTS catalog_poster_refs ON catalog_resource_posters(poster_id)',
   'CREATE INDEX IF NOT EXISTS catalog_category_scope ON catalog_category_bindings(scope_key, category_id)',
@@ -119,6 +207,7 @@ export class CatalogStore {
     if (!this.ready) {
       this.ready = (async () => {
         for (const sql of schema) await this.run(sql);
+        await repairCatalogPlaceholders(this.adapter);
       })().catch((error) => {
         this.ready = undefined;
         throw error;
@@ -602,16 +691,23 @@ export class CatalogStore {
           EXISTS (SELECT 1 FROM json_each(r.payload, '$.catalog_play_lines') line JOIN json_each(line.value, '$.urls') media WHERE ${matches}))`);
       }
     }
-    const query = normalizeTitle(options.query || '').slice(0, 40);
-    if (query) {
-      const terms = titleTerms(query, true);
-      clauses.push(`w.id IN (SELECT work_id FROM catalog_terms WHERE term IN (${terms
-        .map(() => '?')
-        .join(',')})
-        GROUP BY work_id HAVING COUNT(DISTINCT term) = ?)`);
-      values.push(...terms, terms.length);
-      clauses.push('w.normalized_title LIKE ?');
-      values.push(`%${query}%`);
+    const { title, column, termText } = catalogTitleQuery(options.query);
+    if (title) {
+      // Stored terms use the original spelling. Narrow the search by the title
+      // before the season, then check the complete query against the match key.
+      const terms = titleTerms(termText, true);
+      let titleFilter = '';
+      if (terms.length) {
+        titleFilter = `w.id IN (SELECT work_id FROM catalog_terms WHERE term IN (${terms
+          .map(() => '?')
+          .join(',')})
+          GROUP BY work_id HAVING COUNT(DISTINCT term) = ?) AND `;
+        values.push(...terms, terms.length);
+      }
+      clauses.push(
+        `((${titleFilter}${column} LIKE ?) OR ${invisibleTitleSearch})`
+      );
+      values.push(`%${title}%`, `%${title}%`);
     }
     for (const [key, column] of [
       ['kind', 'w.kind'],
@@ -642,6 +738,7 @@ export class CatalogStore {
     return filterM3u8SourceResult(
       {
         ...result,
+        douban_id: catalogDoubanId(result.douban_id),
         poster: result.poster.startsWith(POSTER_PREFIX) ? result.poster : '',
         source_name: site?.name || result.source_name,
         proxyMode: site?.proxyMode || false,
@@ -662,10 +759,10 @@ export class CatalogStore {
 
   // Reconcile legacy IDs at read time so already indexed resources and old URLs keep working.
   private workGroups({ workId, query, year }: CatalogQuery) {
-    const titleQuery = normalizeTitle(query || '').slice(0, 40);
+    const { title, column } = catalogTitleQuery(query);
     const values = [
-      ...(workId ? [workId] : []),
-      ...(titleQuery ? [`%${titleQuery}%`] : []),
+      ...(workId ? [workId, workId] : []),
+      ...(title ? [`%${title}%`, `%${title}%`] : []),
       ...(year ? [year] : []),
     ];
     const douban =
@@ -674,42 +771,55 @@ export class CatalogStore {
         : "CAST(json_extract(r.payload, '$.douban_id') AS TEXT)";
     const sql = `WITH ${
       workId
-        ? 'requested_work AS (SELECT id, normalized_title, year FROM catalog_works WHERE id=?),'
+        ? `requested_work AS (SELECT w.id, (${matchTitle}) AS match_title, w.year FROM catalog_works w
+          WHERE w.id=COALESCE((SELECT work_id FROM catalog_work_redirects WHERE id=?), ?)),`
         : ''
     }
       duplicate_titles AS (
-        SELECT w.normalized_title, w.year FROM catalog_works w
+        SELECT (${matchTitle}) AS match_title, w.year FROM catalog_works w
         ${
           workId
-            ? 'JOIN requested_work q ON q.normalized_title=w.normalized_title AND q.year=w.year'
+            ? `JOIN requested_work q ON q.match_title=(${matchTitle}) AND q.year=w.year`
             : ''
         }
         WHERE w.year<>'' AND w.normalized_title<>''
-        ${titleQuery ? 'AND w.normalized_title LIKE ?' : ''} ${
+        ${title ? `AND (${column} LIKE ? OR ${invisibleTitleSearch})` : ''} ${
       year ? 'AND w.year=?' : ''
     }
-        GROUP BY w.normalized_title, w.year HAVING COUNT(*) > 1
+        GROUP BY 1, 2 HAVING COUNT(*) > 1
       ), duplicate_works AS (
-        SELECT w.id, w.normalized_title, w.year, w.kind,
-          MIN(NULLIF(w.kind, 'other')) OVER by_title AS first_kind,
-          MAX(NULLIF(w.kind, 'other')) OVER by_title AS last_kind,
-          (SELECT CASE WHEN CAST(${douban} AS DECIMAL)>0 THEN ${douban} END
+        SELECT w.id, t.match_title, w.year, w.kind,
+          (SELECT CASE WHEN CAST(${douban} AS DECIMAL)>0
+            AND CAST(${douban} AS DECIMAL) NOT IN (${catalogDoubanPlaceholders.join(
+      ','
+    )}) THEN ${douban} END
             FROM catalog_resources r WHERE r.work_id=w.id LIMIT 1) AS douban_id
         FROM duplicate_titles t JOIN catalog_works w
-          ON w.normalized_title=t.normalized_title AND w.year=t.year
+          ON (${matchTitle})=t.match_title AND w.year=t.year
         WHERE EXISTS (SELECT 1 FROM catalog_resources r WHERE r.work_id=w.id)
-        WINDOW by_title AS (PARTITION BY w.normalized_title, w.year)
-      ), typed_works AS (
-        -- An unknown kind joins a known kind only when all known kinds agree.
-        SELECT *, CASE WHEN kind='other' AND first_kind=last_kind THEN first_kind ELSE kind END AS match_kind
+      ), classified_works AS (
+        SELECT *, MIN(NULLIF(kind, 'other')) OVER by_title AS first_kind,
+          MAX(NULLIF(kind, 'other')) OVER by_title AS last_kind,
+          MIN(douban_id) OVER by_title AS title_first_id,
+          MAX(douban_id) OVER by_title AS title_last_id,
+          MIN(CASE WHEN douban_id IS NOT NULL THEN NULLIF(kind, 'other') END) OVER by_title AS id_first_kind,
+          MAX(CASE WHEN douban_id IS NOT NULL THEN NULLIF(kind, 'other') END) OVER by_title AS id_last_kind,
+          COUNT(douban_id) OVER (PARTITION BY match_title, year, kind) AS ids_in_kind
         FROM duplicate_works
+        WINDOW by_title AS (PARTITION BY match_title, year)
+      ), typed_works AS (
+        -- A shared, unambiguous ID can reconcile source category disagreements.
+        SELECT *, CASE
+          WHEN title_first_id=title_last_id AND id_first_kind<>id_last_kind AND ids_in_kind>0 THEN id_first_kind
+          WHEN kind='other' AND first_kind=last_kind THEN first_kind ELSE kind END AS match_kind
+        FROM classified_works
       ), identified_works AS (
         SELECT *, MIN(douban_id) OVER by_kind AS first_id, MAX(douban_id) OVER by_kind AS last_id
         FROM typed_works
-        WINDOW by_kind AS (PARTITION BY normalized_title, year, match_kind)
+        WINDOW by_kind AS (PARTITION BY match_title, year, match_kind)
       ), work_groups AS (
         -- Keep unidentified resources in a separate group when positive IDs disagree.
-        SELECT id, MIN(id) OVER (PARTITION BY normalized_title, year, match_kind,
+        SELECT id, MIN(id) OVER (PARTITION BY match_title, year, match_kind,
           CASE WHEN first_id<>last_id THEN douban_id END) AS group_id
         FROM identified_works
       )`;

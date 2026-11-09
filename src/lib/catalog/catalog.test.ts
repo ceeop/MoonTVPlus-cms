@@ -12,6 +12,7 @@ import {
   catalogRetentionCutoff,
   catalogScope,
   catalogSettings,
+  catalogWorkId,
   cmsUrl,
   normalizeCmsItem,
   SyncState,
@@ -175,7 +176,7 @@ test('poster cards deduplicate works after applying source permissions', async (
 });
 
 test('folds existing split work IDs into one card and resolves each old detail link', async () => {
-  const primary = normalizeCmsItem(raw({ vod_douban_id: 123 }), a)!;
+  const primary = normalizeCmsItem(raw({ vod_douban_id: 34900321 }), a)!;
   const fallback = normalizeCmsItem(raw(), b)!;
   const unknown = normalizeCmsItem(raw({ vod_id: '2', type_name: '热播' }), b)!;
   const items = [primary, fallback, unknown];
@@ -215,9 +216,191 @@ test('folds existing split work IDs into one card and resolves each old detail l
   expect((await restarted.detail(b, '2'))?.id).toBe('2');
 });
 
+test('combines Chinese and Arabic season spellings without changing existing work links', async () => {
+  const title = '此生要去的的100个地方';
+  const variety = {
+    vod_year: '2026',
+    type_name: '大陆综艺',
+    vod_remarks: '第2期',
+  };
+  const primary = normalizeCmsItem(
+    raw({ ...variety, vod_name: `${title}第二季` }),
+    a
+  )!;
+  const fallback = normalizeCmsItem(
+    raw({ ...variety, vod_name: `${title}第2季` }),
+    b
+  )!;
+  expect(fallback.workId).not.toBe(primary.workId);
+  for (const item of [
+    primary,
+    fallback,
+    normalizeCmsItem(
+      raw({ ...variety, vod_id: '3', vod_name: `${title}第一季` }),
+      a
+    )!,
+    normalizeCmsItem(
+      raw({
+        ...variety,
+        vod_id: '4',
+        vod_name: '此生要去的100个地方第二季加更版',
+      }),
+      b
+    )!,
+  ])
+    await store.put(item, Date.now(), false);
+
+  const wall = await store.browse([a, b], { defaultSourceKey: 'a' });
+  expect(wall.total).toBe(3);
+  expect(wall.results).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ title: primary.title, resource_count: 2 }),
+    ])
+  );
+
+  for (const { title: query, workId } of [primary, fallback]) {
+    expect(await store.search([a, b], { workId })).toMatchObject([
+      { title: primary.title, source: 'a' },
+      { title: fallback.title, source: 'b' },
+    ]);
+    expect(await store.search([a, b], { query })).toHaveLength(3);
+    const filtered = await store.browse([a, b], { query });
+    expect(filtered.total).toBe(2);
+    expect(filtered.results.map((card) => card.resource_count).sort()).toEqual([
+      1, 2,
+    ]);
+  }
+  expect(await store.search([a], { workId: fallback.workId })).toMatchObject([
+    { title: primary.title, source: 'a' },
+  ]);
+});
+
+test.each([
+  ['海昏行2', '海昏行第二季', '国产剧', '2025'],
+  ['大贏家', '大赢家', '喜剧片', '2020'],
+  ['女篮五号', '女篮5号', '剧情片', '1958'],
+  ['丛林巡航', '丛林奇航', '冒险片', '2021'],
+  ['超棒的我们 第二季\u200b', '超棒的我们第02季', '大陆综艺', '2026'],
+  ['你\u200b好湖南', '你好湖南', '大陆综艺', '2026'],
+  ['月魁传动态漫', '月魁传 动态漫画', '国产动漫', '2023'],
+])(
+  'finds and groups the same work by either title: %s / %s',
+  async (left, right, type, year) => {
+    const input = { type_name: type, vod_year: year };
+    const items = [
+      normalizeCmsItem(raw({ ...input, vod_name: left }), a)!,
+      normalizeCmsItem(raw({ ...input, vod_name: right }), b)!,
+    ];
+    for (const item of items) await store.put(item, Date.now(), false);
+    for (const item of items) {
+      const wall = await store.browse([a, b], { query: item.title });
+      expect(wall.total).toBe(1);
+      expect(wall.results[0].resource_count).toBe(2);
+      expect(
+        (await store.search([a, b], { workId: item.workId })).map(
+          (result) => result.source
+        )
+      ).toEqual(['a', 'b']);
+    }
+  }
+);
+
+test('a shared reliable ID reconciles category mismatches without merging other kinds', async () => {
+  const common = {
+    vod_name: '一路前行第二季',
+    vod_year: '2025',
+    vod_douban_id: 37021621,
+  };
+  const variety = normalizeCmsItem(
+    raw({ ...common, type_name: '大陆综艺' }),
+    a
+  )!;
+  const misclassified = normalizeCmsItem(
+    raw({ ...common, type_name: '国产动漫' }),
+    b
+  )!;
+  const alias = normalizeCmsItem(
+    raw({
+      ...common,
+      vod_id: '2',
+      vod_name: '一路前行2',
+      vod_douban_id: 0,
+      type_name: '大陆综艺',
+    }),
+    b
+  )!;
+  const unrelated = normalizeCmsItem(
+    raw({ ...common, vod_id: '3', vod_douban_id: 0, type_name: '电影' }),
+    b
+  )!;
+  for (const item of [variety, misclassified, alias, unrelated])
+    await store.put(item, Date.now(), false);
+
+  expect((await store.browse([a, b])).total).toBe(2);
+  expect(
+    (await store.search([a, b], { workId: alias.workId })).map(
+      (result) => `${result.source}:${result.id}`
+    )
+  ).toEqual(['a:1', 'b:1', 'b:2']);
+  expect(
+    (await store.search([a, b], { workId: unrelated.workId })).map(
+      (result) => result.id
+    )
+  ).toEqual(['3']);
+});
+
+test('repairs old placeholder IDs without moving playback or refreshing retention dates', async () => {
+  const placeholder = 123;
+  const legacyId = catalogWorkId('', '', 'tv', placeholder, '', '');
+  const indexedAt = Date.now() - 86400000;
+  const original = normalizeCmsItem(
+    raw({ vod_name: '原来的剧集', vod_douban_id: placeholder }),
+    a
+  )!;
+  const other = normalizeCmsItem(
+    raw({ vod_name: '另一部剧', vod_year: '2024', vod_douban_id: placeholder }),
+    b
+  )!;
+  expect(original.result.douban_id).toBe(0);
+  expect(original.workId).not.toBe(other.workId);
+  for (const item of [original, other]) {
+    await store.put(
+      {
+        ...item,
+        workId: legacyId,
+        result: { ...item.result, douban_id: placeholder },
+      },
+      indexedAt,
+      false
+    );
+  }
+
+  const reopened = new CatalogStore(new SQLiteAdapter(database));
+  expect((await reopened.browse([a, b])).total).toBe(2);
+  expect(await reopened.search([a, b], { workId: legacyId })).toMatchObject([
+    { title: original.title, source: 'a' },
+  ]);
+  expect(await reopened.search([a, b], { query: other.title })).toMatchObject([
+    {
+      title: other.title,
+      id: '1',
+      source: 'b',
+      douban_id: 0,
+      episodes: other.result.episodes,
+    },
+  ]);
+  expect(
+    await reopened.rows('SELECT DISTINCT indexed_at FROM catalog_resources')
+  ).toEqual([{ indexed_at: indexedAt }]);
+  expect(await reopened.search([b], { workId: legacyId })).toEqual([]);
+});
+
 test('keeps conflicting Douban IDs, release years, types and editions apart', async () => {
-  const first = normalizeCmsItem(raw({ vod_douban_id: 123 }), a)!;
-  const second = normalizeCmsItem(raw({ vod_id: '2', vod_douban_id: 456 }), b)!;
+  const first = normalizeCmsItem(raw({ vod_douban_id: 34900321 }), a)!;
+  const second = normalizeCmsItem(
+    raw({ vod_id: '2', vod_name: '三体 第1季', vod_douban_id: 34900322 }),
+    b
+  )!;
   const fallback = normalizeCmsItem(raw(), b)!;
   const separate = [
     { vod_year: '2024' },

@@ -183,14 +183,19 @@ describePostgres('PostgreSQL storage integration', () => {
       vod_play_url: '第1集$https://video.invalid/1.m3u8',
       vod_time: '2026-11-01 10:00:00',
     };
-    const item = normalizeCmsItem({ ...raw, vod_douban_id: 123 }, source)!;
-    const fallback = normalizeCmsItem({ ...raw, type_name: '热播' }, other)!;
+    const item = normalizeCmsItem({ ...raw, vod_douban_id: 34900321 }, source)!;
+    const fallback = normalizeCmsItem(
+      { ...raw, vod_name: '三体 第1季', type_name: '热播' },
+      other
+    )!;
     await catalog.put(item, Date.now(), false);
     await catalog.put(fallback, Date.now(), false);
     expect((await catalog.search([source], { query: '三体' }))[0].title).toBe(
       '三体 第一季'
     );
-    const wall = await catalog.browse([source, other]);
+    const wall = await catalog.browse([source, other], {
+      query: '三体 第一季',
+    });
     expect(wall.total).toBe(1);
     expect(wall.results[0].resource_count).toBe(2);
     expect(

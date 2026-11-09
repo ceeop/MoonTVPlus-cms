@@ -42,6 +42,7 @@ import {
 } from '@/lib/special-source.client';
 import { SearchResult } from '@/lib/types';
 import { processImageUrl } from '@/lib/utils';
+import { videoTitleMatchKey } from '@/lib/video-title';
 
 import AcgSearch from '@/components/AcgSearch';
 import CapsuleSwitch from '@/components/CapsuleSwitch';
@@ -382,14 +383,6 @@ export function SearchPageClient({
     return order === 'asc' ? aNum - bNum : bNum - aNum;
   };
 
-  // 规范化标题用于聚合（去除特殊符号、括号、空格和全角空格）
-  const normalizeTitle = (title: string) => {
-    return title
-      .replace(/[\s\u3000]/g, '') // 去除空格和全角空格
-      .replace(/[()（）[\]【】{}「」『』<>《》]/g, '') // 去除各种括号
-      .replace(/[^\w\u4e00-\u9fa5]/g, ''); // 去除特殊符号，保留字母、数字、下划线和中文
-  };
-
   // 辅助函数：获取视频类型
   const getType = (item: SearchResult): 'movie' | 'tv' => {
     // 1. Emby 和 OpenList 源：使用 type_name（基于 TMDB，最可靠）
@@ -440,10 +433,14 @@ export function SearchPageClient({
     if (!exactSearch) return true; // 如果未开启精确搜索，不过滤
     if (!query || !title) return true; // 如果没有搜索词或标题，不过滤
 
-    const normalizedTitle = title.toLowerCase();
-    const normalizedQuery = query.toLowerCase();
+    const lowerTitle = title.toLowerCase();
+    const lowerQuery = query.toLowerCase();
+    const titleKey = videoTitleMatchKey(lowerQuery);
 
-    return normalizedTitle.includes(normalizedQuery);
+    return (
+      lowerTitle.includes(lowerQuery) ||
+      (Boolean(titleKey) && videoTitleMatchKey(lowerTitle).includes(titleKey))
+    );
   };
 
   const allExactSearchResults = useMemo(() => {
@@ -460,7 +457,7 @@ export function SearchPageClient({
     const preliminaryMap = new Map<string, SearchResult[]>();
 
     allExactSearchResults.forEach((item) => {
-      const normalizedTitle = normalizeTitle(item.title);
+      const normalizedTitle = videoTitleMatchKey(item.title);
       const type = getType(item);
       const preliminaryKey = `${normalizedTitle}-${type}`;
 

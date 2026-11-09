@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import type { AdminConfig } from '@/lib/admin.types';
 import type { ApiSite } from '@/lib/config';
 import type { SearchResult } from '@/lib/types';
+import { normalizeVideoTitle } from '@/lib/video-title';
 import { yellowWords } from '@/lib/yellow';
 
 import {
@@ -187,10 +188,38 @@ export function sourceRevision(site: ApiSite): string {
 }
 
 export function normalizeTitle(value: string): string {
-  return value
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(new RegExp('[\\s\\p{P}\\p{S}]', 'gu'), '');
+  return normalizeVideoTitle(value);
+}
+
+// Some CMS feeds reuse these placeholders for unrelated works.
+export const catalogDoubanPlaceholders = [
+  1, 6, 111, 123, 456, 789, 1123, 1233, 1423,
+];
+
+export function catalogDoubanId(value: unknown): number {
+  const id = Number(value);
+  return Number.isSafeInteger(id) &&
+    id > 0 &&
+    !catalogDoubanPlaceholders.includes(id)
+    ? id
+    : 0;
+}
+
+export function catalogWorkId(
+  normalizedTitle: string,
+  year: string,
+  kind: CatalogKind,
+  doubanId: number,
+  source: string,
+  id: string
+): string {
+  const identity =
+    doubanId > 0
+      ? `douban:${doubanId}:${kind}`
+      : year && kind !== 'other'
+      ? `title:${normalizedTitle}:${year}:${kind}`
+      : `resource:${source}:${id}`;
+  return createHash('sha256').update(identity).digest('hex').slice(0, 32);
 }
 
 // Single characters support one-character queries; bigrams also index Chinese titles.
@@ -238,19 +267,17 @@ export function normalizeCmsItem(
   const typeName = stringValue(raw.type_name);
   const kind = classifyVideo(typeName);
   const year = stringValue(raw.vod_year).match(/\d{4}/)?.[0] || '';
-  const doubanId = Number(raw.vod_douban_id) || 0;
+  const doubanId = catalogDoubanId(raw.vod_douban_id);
   const normalizedTitle = normalizeTitle(title);
   // Preserve seasons/editions in the title; unknown years/categories stay separate.
-  const identity =
-    doubanId > 0
-      ? `douban:${doubanId}:${kind}`
-      : year && kind !== 'other'
-      ? `title:${normalizedTitle}:${year}:${kind}`
-      : `resource:${site.key}:${id}`;
-  const workId = createHash('sha256')
-    .update(identity)
-    .digest('hex')
-    .slice(0, 32);
+  const workId = catalogWorkId(
+    normalizedTitle,
+    year,
+    kind,
+    doubanId,
+    site.key,
+    id
+  );
   const names = stringValue(raw.vod_play_from).split('$$$');
   const playLines = stringValue(raw.vod_play_url)
     .split('$$$')

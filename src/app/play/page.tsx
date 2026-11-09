@@ -97,6 +97,7 @@ import {
 import { getTMDBImageUrl } from '@/lib/tmdb.search';
 import { DanmakuFilterConfig, EpisodeFilterConfig, SearchResult } from '@/lib/types';
 import { base58Decode, getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
+import { videoTitleMatchKey } from '@/lib/video-title';
 import {
   isDuanjuTypeName,
   isDuanjuVerticalDisabled,
@@ -5154,14 +5155,6 @@ function PlayPageClient() {
       }
     };
 
-    // 规范化标题用于聚合（去除特殊符号、括号、空格和全角空格）
-    const normalizeTitle = (title: string) => {
-      return title
-        .replace(/[\s\u3000]/g, '') // 去除空格和全角空格
-        .replace(/[()（）[\]【】{}「」『』<>《》]/g, '') // 去除各种括号
-        .replace(/[^\w\u4e00-\u9fa5]/g, ''); // 去除特殊符号，保留字母、数字、下划线和中文
-    };
-
     // 辅助函数：获取视频类型
     const getType = (item: SearchResult): 'movie' | 'tv' => {
       // 1. Emby 和 OpenList 源：使用 type_name（基于 TMDB，最可靠）
@@ -5202,7 +5195,7 @@ function PlayPageClient() {
       const preliminaryMap = new Map<string, SearchResult[]>();
 
       typedItems.forEach((item) => {
-        const preliminaryKey = `${normalizeTitle(item.title).toLowerCase()}-${getType(item)}`;
+        const preliminaryKey = `${videoTitleMatchKey(item.title)}-${getType(item)}`;
         const group = preliminaryMap.get(preliminaryKey) || [];
         group.push(item);
         preliminaryMap.set(preliminaryKey, group);
@@ -5282,12 +5275,12 @@ function PlayPageClient() {
         }
       });
 
-      const normalizedQuery = normalizeTitle(query).toLowerCase();
+      const normalizedQuery = videoTitleMatchKey(query);
 
       return finalRecommendations
         .sort((a, b) => {
-          const aContains = normalizeTitle(a.item.title).toLowerCase().includes(normalizedQuery) ? 1 : 0;
-          const bContains = normalizeTitle(b.item.title).toLowerCase().includes(normalizedQuery) ? 1 : 0;
+          const aContains = videoTitleMatchKey(a.item.title).includes(normalizedQuery) ? 1 : 0;
+          const bContains = videoTitleMatchKey(b.item.title).includes(normalizedQuery) ? 1 : 0;
           if (bContains !== aContains) return bContains - aContains;
           if (b.sourceNames.length !== a.sourceNames.length) return b.sourceNames.length - a.sourceNames.length;
           return (b.item.weight ?? 0) - (a.item.weight ?? 0);
@@ -5338,8 +5331,8 @@ function PlayPageClient() {
     const filterSourcesForCurrentVideo = (items: SearchResult[]): SearchResult[] => {
       return items.filter(
         (result: SearchResult) =>
-          normalizeTitle(result.title).toLowerCase() ===
-          normalizeTitle(videoTitleRef.current).toLowerCase() &&
+          videoTitleMatchKey(result.title) ===
+          videoTitleMatchKey(videoTitleRef.current) &&
           (videoYearRef.current
             ? result.year.toLowerCase() === videoYearRef.current.toLowerCase() ||
               !result.year ||
